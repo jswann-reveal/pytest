@@ -1053,7 +1053,7 @@ class FixtureDef(Generic[FixtureValue]):
             # note: comparison with `==` can fail (or be expensive) for e.g.
             # numpy arrays (#6497).
             cache_key = self.cached_result[1]
-            if my_cache_key is cache_key:
+            if my_cache_key == cache_key:
                 if self.cached_result[2] is not None:
                     _, val, tb = self.cached_result[2]
                     raise val.with_traceback(tb)
