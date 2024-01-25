@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import pytest
-from _pytest.compat import LEGACY_PATH
+from _pytest.fixtures import TopRequest
+from _pytest.legacypath import LEGACY_PATH
 from _pytest.legacypath import TempdirFactory
 from _pytest.legacypath import Testdir
 
@@ -14,7 +15,7 @@ def test_item_fspath(pytester: pytest.Pytester) -> None:
     items2, hookrec = pytester.inline_genitems(item.nodeid)
     (item2,) = items2
     assert item2.name == item.name
-    assert item2.fspath == item.fspath
+    assert item2.fspath == item.fspath  # type: ignore[attr-defined]
     assert item2.path == item.path
 
 
@@ -90,7 +91,8 @@ def test_cache_makedir(cache: pytest.Cache) -> None:
 def test_fixturerequest_getmodulepath(pytester: pytest.Pytester) -> None:
     modcol = pytester.getmodulecol("def test_somefunc(): pass")
     (item,) = pytester.genitems([modcol])
-    req = pytest.FixtureRequest(item, _ispytest=True)
+    assert isinstance(item, pytest.Function)
+    req = TopRequest(item, _ispytest=True)
     assert req.path == modcol.path
     assert req.fspath == modcol.fspath  # type: ignore[attr-defined]
 

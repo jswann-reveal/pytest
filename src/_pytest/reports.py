@@ -1,21 +1,23 @@
+import dataclasses
 import os
 from io import StringIO
 from pprint import pprint
 from typing import Any
 from typing import cast
 from typing import Dict
+from typing import final
 from typing import Iterable
 from typing import Iterator
 from typing import List
+from typing import Literal
 from typing import Mapping
+from typing import NoReturn
 from typing import Optional
 from typing import Tuple
 from typing import Type
 from typing import TYPE_CHECKING
 from typing import TypeVar
 from typing import Union
-
-import attr
 
 from _pytest._code.code import ExceptionChainRepr
 from _pytest._code.code import ExceptionInfo
@@ -29,16 +31,12 @@ from _pytest._code.code import ReprLocals
 from _pytest._code.code import ReprTraceback
 from _pytest._code.code import TerminalRepr
 from _pytest._io import TerminalWriter
-from _pytest.compat import final
 from _pytest.config import Config
 from _pytest.nodes import Collector
 from _pytest.nodes import Item
 from _pytest.outcomes import skip
 
 if TYPE_CHECKING:
-    from typing import NoReturn
-    from typing_extensions import Literal
-
     from _pytest.runner import CallInfo
 
 
@@ -65,7 +63,7 @@ class BaseReport:
     ]
     sections: List[Tuple[str, str]]
     nodeid: str
-    outcome: "Literal['passed', 'failed', 'skipped']"
+    outcome: Literal["passed", "failed", "skipped"]
 
     def __init__(self, **kw: Any) -> None:
         self.__dict__.update(kw)
@@ -229,7 +227,7 @@ class BaseReport:
 
 def _report_unserialization_failure(
     type_name: str, report_class: Type[BaseReport], reportdict
-) -> "NoReturn":
+) -> NoReturn:
     url = "https://github.com/pytest-dev/pytest/issues"
     stream = StringIO()
     pprint("-" * 100, stream=stream)
@@ -250,19 +248,24 @@ class TestReport(BaseReport):
     """
 
     __test__ = False
+    # Defined by skipping plugin.
+    # xfail reason if xfailed, otherwise not defined. Use hasattr to distinguish.
+    wasxfail: str
 
     def __init__(
         self,
         nodeid: str,
         location: Tuple[str, Optional[int], str],
         keywords: Mapping[str, Any],
-        outcome: "Literal['passed', 'failed', 'skipped']",
+        outcome: Literal["passed", "failed", "skipped"],
         longrepr: Union[
             None, ExceptionInfo[BaseException], Tuple[str, int, str], str, TerminalRepr
         ],
-        when: "Literal['setup', 'call', 'teardown']",
+        when: Literal["setup", "call", "teardown"],
         sections: Iterable[Tuple[str, str]] = (),
         duration: float = 0,
+        start: float = 0,
+        stop: float = 0,
         user_properties: Optional[Iterable[Tuple[str, object]]] = None,
         **extra,
     ) -> None:
@@ -272,11 +275,13 @@ class TestReport(BaseReport):
         #: A (filesystempath, lineno, domaininfo) tuple indicating the
         #: actual location of a test item - it might be different from the
         #: collected one e.g. if a method is inherited from a different module.
+        #: The filesystempath may be relative to ``config.rootdir``.
+        #: The line number is 0-based.
         self.location: Tuple[str, Optional[int], str] = location
 
         #: A name -> value dictionary containing all keywords and
         #: markers associated with a test invocation.
-        self.keywords = keywords
+        self.keywords: Mapping[str, Any] = keywords
 
         #: Test outcome, always one of "passed", "failed", "skipped".
         self.outcome = outcome
@@ -298,7 +303,12 @@ class TestReport(BaseReport):
         self.sections = list(sections)
 
         #: Time it took to run just the test.
-        self.duration = duration
+        self.duration: float = duration
+
+        #: The system time when the call started, in seconds since the epoch.
+        self.start: float = start
+        #: The system time when the call ended, in seconds since the epoch.
+        self.stop: float = stop
 
         self.__dict__.update(extra)
 
@@ -309,11 +319,17 @@ class TestReport(BaseReport):
 
     @classmethod
     def from_item_and_call(cls, item: Item, call: "CallInfo[None]") -> "TestReport":
-        """Create and fill a TestReport with standard item and call info."""
+        """Create and fill a TestReport with standard item and call info.
+
+        :param item: The item.
+        :param call: The call info.
+        """
         when = call.when
         # Remove "collect" from the Literal type -- only for collection calls.
         assert when != "collect"
         duration = call.duration
+        start = call.start
+        stop = call.stop
         keywords = {x: 1 for x in item.keywords}
         excinfo = call.excinfo
         sections = []
@@ -333,6 +349,9 @@ class TestReport(BaseReport):
             elif isinstance(excinfo.value, skip.Exception):
                 outcome = "skipped"
                 r = excinfo._getreprcrash()
+                assert (
+                    r is not None
+                ), "There should always be a traceback entry for skipping a test."
                 if excinfo.value._use_item_location:
                     path, line = item.reportinfo()[:2]
                     assert line is not None
@@ -358,6 +377,8 @@ class TestReport(BaseReport):
             when,
             sections,
             duration,
+            start,
+            stop,
             user_properties=item.user_properties,
         )
 
@@ -403,7 +424,9 @@ class CollectReport(BaseReport):
         self.__dict__.update(extra)
 
     @property
-    def location(self):
+    def location(  # type:ignore[override]
+        self,
+    ) -> Optional[Tuple[str, Optional[int], str]]:
         return (self.fspath, None, self.fspath)
 
     def __repr__(self) -> str:
@@ -455,15 +478,15 @@ def _report_to_json(report: BaseReport) -> Dict[str, Any]:
     def serialize_repr_entry(
         entry: Union[ReprEntry, ReprEntryNative]
     ) -> Dict[str, Any]:
-        data = attr.asdict(entry)
+        data = dataclasses.asdict(entry)
         for key, value in data.items():
             if hasattr(value, "__dict__"):
-                data[key] = attr.asdict(value)
+                data[key] = dataclasses.asdict(value)
         entry_data = {"type": type(entry).__name__, "data": data}
         return entry_data
 
     def serialize_repr_traceback(reprtraceback: ReprTraceback) -> Dict[str, Any]:
-        result = attr.asdict(reprtraceback)
+        result = dataclasses.asdict(reprtraceback)
         result["reprentries"] = [
             serialize_repr_entry(x) for x in reprtraceback.reprentries
         ]
@@ -473,7 +496,7 @@ def _report_to_json(report: BaseReport) -> Dict[str, Any]:
         reprcrash: Optional[ReprFileLocation],
     ) -> Optional[Dict[str, Any]]:
         if reprcrash is not None:
-            return attr.asdict(reprcrash)
+            return dataclasses.asdict(reprcrash)
         else:
             return None
 
@@ -569,7 +592,6 @@ def _report_kwargs_from_json(reportdict: Dict[str, Any]) -> Dict[str, Any]:
         and "reprcrash" in reportdict["longrepr"]
         and "reprtraceback" in reportdict["longrepr"]
     ):
-
         reprtraceback = deserialize_repr_traceback(
             reportdict["longrepr"]["reprtraceback"]
         )
@@ -590,7 +612,10 @@ def _report_kwargs_from_json(reportdict: Dict[str, Any]) -> Dict[str, Any]:
                 ExceptionChainRepr, ReprExceptionInfo
             ] = ExceptionChainRepr(chain)
         else:
-            exception_info = ReprExceptionInfo(reprtraceback, reprcrash)
+            exception_info = ReprExceptionInfo(
+                reprtraceback=reprtraceback,
+                reprcrash=reprcrash,
+            )
 
         for section in reportdict["longrepr"]["sections"]:
             exception_info.addsection(*section)

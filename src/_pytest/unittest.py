@@ -29,7 +29,6 @@ from _pytest.python import Class
 from _pytest.python import Function
 from _pytest.python import Module
 from _pytest.runner import CallInfo
-from _pytest.scope import Scope
 
 if TYPE_CHECKING:
     import unittest
@@ -71,8 +70,9 @@ class UnitTestCase(Class):
 
         skipped = _is_skipped(cls)
         if not skipped:
-            self._inject_setup_teardown_fixtures(cls)
-            self._inject_setup_class_fixture()
+            self._register_unittest_setup_method_fixture(cls)
+            self._register_unittest_setup_class_fixture(cls)
+            self._register_setup_class_fixture()
 
         self.session._fixturemanager.parsefactories(self, unittest=True)
         loader = TestLoader()
@@ -93,91 +93,75 @@ class UnitTestCase(Class):
                 if ut is None or runtest != ut.TestCase.runTest:  # type: ignore
                     yield TestCaseFunction.from_parent(self, name="runTest")
 
-    def _inject_setup_teardown_fixtures(self, cls: type) -> None:
-        """Injects a hidden auto-use fixture to invoke setUpClass/setup_method and corresponding
-        teardown functions (#517)."""
-        class_fixture = _make_xunit_fixture(
-            cls,
-            "setUpClass",
-            "tearDownClass",
-            "doClassCleanups",
-            scope=Scope.Class,
-            pass_self=False,
-        )
-        if class_fixture:
-            cls.__pytest_class_setup = class_fixture  # type: ignore[attr-defined]
+    def _register_unittest_setup_class_fixture(self, cls: type) -> None:
+        """Register an auto-use fixture to invoke setUpClass and
+        tearDownClass (#517)."""
+        setup = getattr(cls, "setUpClass", None)
+        teardown = getattr(cls, "tearDownClass", None)
+        if setup is None and teardown is None:
+            return None
+        cleanup = getattr(cls, "doClassCleanups", lambda: None)
 
-        method_fixture = _make_xunit_fixture(
-            cls,
-            "setup_method",
-            "teardown_method",
-            None,
-            scope=Scope.Function,
-            pass_self=True,
-        )
-        if method_fixture:
-            cls.__pytest_method_setup = method_fixture  # type: ignore[attr-defined]
-
-
-def _make_xunit_fixture(
-    obj: type,
-    setup_name: str,
-    teardown_name: str,
-    cleanup_name: Optional[str],
-    scope: Scope,
-    pass_self: bool,
-):
-    setup = getattr(obj, setup_name, None)
-    teardown = getattr(obj, teardown_name, None)
-    if setup is None and teardown is None:
-        return None
-
-    if cleanup_name:
-        cleanup = getattr(obj, cleanup_name, lambda *args: None)
-    else:
-
-        def cleanup(*args):
-            pass
-
-    @pytest.fixture(
-        scope=scope.value,
-        autouse=True,
-        # Use a unique name to speed up lookup.
-        name=f"_unittest_{setup_name}_fixture_{obj.__qualname__}",
-    )
-    def fixture(self, request: FixtureRequest) -> Generator[None, None, None]:
-        if _is_skipped(self):
-            reason = self.__unittest_skip_why__
-            raise pytest.skip.Exception(reason, _use_item_location=True)
-        if setup is not None:
-            try:
-                if pass_self:
-                    setup(self, request.function)
-                else:
+        def unittest_setup_class_fixture(
+            request: FixtureRequest,
+        ) -> Generator[None, None, None]:
+            cls = request.cls
+            if _is_skipped(cls):
+                reason = cls.__unittest_skip_why__
+                raise pytest.skip.Exception(reason, _use_item_location=True)
+            if setup is not None:
+                try:
                     setup()
-            # unittest does not call the cleanup function for every BaseException, so we
-            # follow this here.
-            except Exception:
-                if pass_self:
-                    cleanup(self)
-                else:
+                # unittest does not call the cleanup function for every BaseException, so we
+                # follow this here.
+                except Exception:
                     cleanup()
-
-                raise
-        yield
-        try:
-            if teardown is not None:
-                if pass_self:
-                    teardown(self, request.function)
-                else:
+                    raise
+            yield
+            try:
+                if teardown is not None:
                     teardown()
-        finally:
-            if pass_self:
-                cleanup(self)
-            else:
+            finally:
                 cleanup()
 
-    return fixture
+        self.session._fixturemanager._register_fixture(
+            # Use a unique name to speed up lookup.
+            name=f"_unittest_setUpClass_fixture_{cls.__qualname__}",
+            func=unittest_setup_class_fixture,
+            nodeid=self.nodeid,
+            scope="class",
+            autouse=True,
+        )
+
+    def _register_unittest_setup_method_fixture(self, cls: type) -> None:
+        """Register an auto-use fixture to invoke setup_method and
+        teardown_method (#517)."""
+        setup = getattr(cls, "setup_method", None)
+        teardown = getattr(cls, "teardown_method", None)
+        if setup is None and teardown is None:
+            return None
+
+        def unittest_setup_method_fixture(
+            request: FixtureRequest,
+        ) -> Generator[None, None, None]:
+            self = request.instance
+            if _is_skipped(self):
+                reason = self.__unittest_skip_why__
+                raise pytest.skip.Exception(reason, _use_item_location=True)
+            if setup is not None:
+                setup(self, request.function)
+            yield
+            if teardown is not None:
+                teardown(self, request.function)
+
+        self.session._fixturemanager._register_fixture(
+            # Use a unique name to speed up lookup.
+            name=f"_unittest_setup_method_fixture_{cls.__qualname__}",
+            func=unittest_setup_method_fixture,
+            nodeid=self.nodeid,
+            scope="function",
+            autouse=True,
+        )
 
 
 class TestCaseFunction(Function):
@@ -200,10 +184,10 @@ class TestCaseFunction(Function):
         assert self.parent is not None
         self._testcase = self.parent.obj(self.name)  # type: ignore[attr-defined]
         self._obj = getattr(self._testcase, self.name)
-        if hasattr(self, "_request"):
-            self._request._fillfixtures()
+        super().setup()
 
     def teardown(self) -> None:
+        super().teardown()
         if self._explicit_tearDown is not None:
             self._explicit_tearDown()
             self._explicit_tearDown = None
@@ -298,6 +282,9 @@ class TestCaseFunction(Function):
     def stopTest(self, testcase: "unittest.TestCase") -> None:
         pass
 
+    def addDuration(self, testcase: "unittest.TestCase", elapsed: float) -> None:
+        pass
+
     def runtest(self) -> None:
         from _pytest.debugging import maybe_wrap_pytest_function_for_tracing
 
@@ -316,7 +303,10 @@ class TestCaseFunction(Function):
             # Arguably we could always postpone tearDown(), but this changes the moment where the
             # TestCase instance interacts with the results object, so better to only do it
             # when absolutely needed.
-            if self.config.getoption("usepdb") and not _is_skipped(self.obj):
+            # We need to consider if the test itself is skipped, or the whole class.
+            assert isinstance(self.parent, UnitTestCase)
+            skipped = _is_skipped(self.obj) or _is_skipped(self.parent.obj)
+            if self.config.getoption("usepdb") and not skipped:
                 self._explicit_tearDown = self._testcase.tearDown
                 setattr(self._testcase, "tearDown", lambda *args: None)
 
@@ -328,15 +318,16 @@ class TestCaseFunction(Function):
             finally:
                 delattr(self._testcase, self.name)
 
-    def _prunetraceback(
+    def _traceback_filter(
         self, excinfo: _pytest._code.ExceptionInfo[BaseException]
-    ) -> None:
-        super()._prunetraceback(excinfo)
-        traceback = excinfo.traceback.filter(
-            lambda x: not x.frame.f_globals.get("__unittest")
+    ) -> _pytest._code.Traceback:
+        traceback = super()._traceback_filter(excinfo)
+        ntraceback = traceback.filter(
+            lambda x: not x.frame.f_globals.get("__unittest"),
         )
-        if traceback:
-            excinfo.traceback = traceback
+        if not ntraceback:
+            ntraceback = traceback
+        return ntraceback
 
 
 @hookimpl(tryfirst=True)
@@ -369,8 +360,8 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]) -> None:
 # Twisted trial support.
 
 
-@hookimpl(hookwrapper=True)
-def pytest_runtest_protocol(item: Item) -> Generator[None, None, None]:
+@hookimpl(wrapper=True)
+def pytest_runtest_protocol(item: Item) -> Generator[None, object, object]:
     if isinstance(item, TestCaseFunction) and "twisted.trial.unittest" in sys.modules:
         ut: Any = sys.modules["twisted.python.failure"]
         Failure__init__ = ut.Failure.__init__
@@ -393,10 +384,13 @@ def pytest_runtest_protocol(item: Item) -> Generator[None, None, None]:
                 Failure__init__(self, exc_value, exc_type, exc_tb)
 
         ut.Failure.__init__ = excstore
-        yield
-        ut.Failure.__init__ = Failure__init__
+        try:
+            res = yield
+        finally:
+            ut.Failure.__init__ = Failure__init__
     else:
-        yield
+        res = yield
+    return res
 
 
 def check_testcase_implements_trial_reporter(done: List[int] = []) -> None:

@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 from types import ModuleType
 from typing import List
 
@@ -11,7 +10,6 @@ import pytest
 from _pytest.config import ExitCode
 from _pytest.config import PytestPluginManager
 from _pytest.monkeypatch import MonkeyPatch
-from _pytest.pytester import CwdSnapshot
 from _pytest.pytester import HookRecorder
 from _pytest.pytester import LineMatcher
 from _pytest.pytester import Pytester
@@ -222,7 +220,7 @@ class TestInlineRunModulesCleanup:
         result = pytester.inline_run(str(test_mod))
         assert result.ret == ExitCode.OK
         # rewrite module, now test should fail if module was re-imported
-        test_mod.write_text("def test_foo(): assert False")
+        test_mod.write_text("def test_foo(): assert False", encoding="utf-8")
         result2 = pytester.inline_run(str(test_mod))
         assert result2.ret == ExitCode.TESTS_FAILED
 
@@ -299,17 +297,6 @@ def test_assert_outcomes_after_pytest_error(pytester: Pytester) -> None:
     result = pytester.runpytest("--unexpected-argument")
     with pytest.raises(ValueError, match="Pytest terminal summary report not found"):
         result.assert_outcomes(passed=0)
-
-
-def test_cwd_snapshot(pytester: Pytester) -> None:
-    foo = pytester.mkdir("foo")
-    bar = pytester.mkdir("bar")
-    os.chdir(foo)
-    snapshot = CwdSnapshot()
-    os.chdir(bar)
-    assert Path().absolute() == bar
-    snapshot.restore()
-    assert Path().absolute() == foo
 
 
 class TestSysModulesSnapshot:

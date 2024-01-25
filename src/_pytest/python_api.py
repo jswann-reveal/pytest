@@ -8,7 +8,8 @@ from types import TracebackType
 from typing import Any
 from typing import Callable
 from typing import cast
-from typing import Generic
+from typing import ContextManager
+from typing import final
 from typing import List
 from typing import Mapping
 from typing import Optional
@@ -21,23 +22,12 @@ from typing import TYPE_CHECKING
 from typing import TypeVar
 from typing import Union
 
-if TYPE_CHECKING:
-    from numpy import ndarray
-
-
 import _pytest._code
-from _pytest.compat import final
 from _pytest.compat import STRING_TYPES
 from _pytest.outcomes import fail
 
-
-def _non_numeric_type_error(value, at: Optional[str]) -> TypeError:
-    at_str = f" at {at}" if at else ""
-    return TypeError(
-        "cannot make approximate comparisons to non-numeric values: {!r} {}".format(
-            value, at_str
-        )
-    )
+if TYPE_CHECKING:
+    from numpy import ndarray
 
 
 def _compare_approx(
@@ -133,9 +123,11 @@ class ApproxBase:
         # raise if there are any non-numeric elements in the sequence.
 
 
-def _recursive_list_map(f, x):
-    if isinstance(x, list):
-        return [_recursive_list_map(f, xi) for xi in x]
+def _recursive_sequence_map(f, x):
+    """Recursively map a function over a sequence of arbitrary depth"""
+    if isinstance(x, (list, tuple)):
+        seq_type = type(x)
+        return seq_type(_recursive_sequence_map(f, xi) for xi in x)
     else:
         return f(x)
 
@@ -144,7 +136,9 @@ class ApproxNumpy(ApproxBase):
     """Perform approximate comparisons where the expected value is numpy array."""
 
     def __repr__(self) -> str:
-        list_scalars = _recursive_list_map(self._approx_scalar, self.expected.tolist())
+        list_scalars = _recursive_sequence_map(
+            self._approx_scalar, self.expected.tolist()
+        )
         return f"approx({list_scalars!r})"
 
     def _repr_compare(self, other_side: "ndarray") -> List[str]:
@@ -164,7 +158,7 @@ class ApproxNumpy(ApproxBase):
             return value
 
         np_array_shape = self.expected.shape
-        approx_side_as_list = _recursive_list_map(
+        approx_side_as_seq = _recursive_sequence_map(
             self._approx_scalar, self.expected.tolist()
         )
 
@@ -179,7 +173,7 @@ class ApproxNumpy(ApproxBase):
         max_rel_diff = -math.inf
         different_ids = []
         for index in itertools.product(*(range(i) for i in np_array_shape)):
-            approx_value = get_value_from_nested_list(approx_side_as_list, index)
+            approx_value = get_value_from_nested_list(approx_side_as_seq, index)
             other_value = get_value_from_nested_list(other_side, index)
             if approx_value != other_value:
                 abs_diff = abs(approx_value.expected - other_value)
@@ -194,7 +188,7 @@ class ApproxNumpy(ApproxBase):
             (
                 str(index),
                 str(get_value_from_nested_list(other_side, index)),
-                str(get_value_from_nested_list(approx_side_as_list, index)),
+                str(get_value_from_nested_list(approx_side_as_seq, index)),
             )
             for index in different_ids
         ]
@@ -262,13 +256,20 @@ class ApproxMapping(ApproxBase):
             approx_side_as_map.items(), other_side.values()
         ):
             if approx_value != other_value:
-                max_abs_diff = max(
-                    max_abs_diff, abs(approx_value.expected - other_value)
-                )
-                max_rel_diff = max(
-                    max_rel_diff,
-                    abs((approx_value.expected - other_value) / approx_value.expected),
-                )
+                if approx_value.expected is not None and other_value is not None:
+                    max_abs_diff = max(
+                        max_abs_diff, abs(approx_value.expected - other_value)
+                    )
+                    if approx_value.expected == 0.0:
+                        max_rel_diff = math.inf
+                    else:
+                        max_rel_diff = max(
+                            max_rel_diff,
+                            abs(
+                                (approx_value.expected - other_value)
+                                / approx_value.expected
+                            ),
+                        )
                 different_ids.append(approx_key)
 
         message_data = [
@@ -319,7 +320,6 @@ class ApproxSequenceLike(ApproxBase):
 
     def _repr_compare(self, other_side: Sequence[float]) -> List[str]:
         import math
-        import numpy as np
 
         if len(self.expected) != len(other_side):
             return [
@@ -327,7 +327,7 @@ class ApproxSequenceLike(ApproxBase):
                 f"Lengths: {len(self.expected)} and {len(other_side)}",
             ]
 
-        approx_side_as_map = _recursive_list_map(self._approx_scalar, self.expected)
+        approx_side_as_map = _recursive_sequence_map(self._approx_scalar, self.expected)
 
         number_of_elements = len(approx_side_as_map)
         max_abs_diff = -math.inf
@@ -340,7 +340,7 @@ class ApproxSequenceLike(ApproxBase):
                 abs_diff = abs(approx_value.expected - other_value)
                 max_abs_diff = max(max_abs_diff, abs_diff)
                 if other_value == 0.0:
-                    max_rel_diff = np.inf
+                    max_rel_diff = math.inf
                 else:
                     max_rel_diff = max(max_rel_diff, abs_diff / abs(other_value))
                 different_ids.append(i)
@@ -518,7 +518,7 @@ def approx(expected, rel=None, abs=None, nan_ok: bool = False) -> ApproxBase:
     """Assert that two numbers (or two ordered sequences of numbers) are equal to each other
     within some tolerance.
 
-    Due to the :std:doc:`tutorial/floatingpoint`, numbers that we
+    Due to the :doc:`python:tutorial/floatingpoint`, numbers that we
     would intuitively expect to be equal are not always so::
 
         >>> 0.1 + 0.2 == 0.3
@@ -573,7 +573,7 @@ def approx(expected, rel=None, abs=None, nan_ok: bool = False) -> ApproxBase:
         >>> {'a': 0.1 + 0.2, 'b': 0.2 + 0.4} == approx({'a': 0.3, 'b': 0.6})
         True
 
-    The comparision will be true if both mappings have the same keys and their
+    The comparison will be true if both mappings have the same keys and their
     respective values match the expected tolerances.
 
     **Tolerances**
@@ -666,6 +666,11 @@ def approx(expected, rel=None, abs=None, nan_ok: bool = False) -> ApproxBase:
         ``approx`` can handle numpy arrays, but we recommend the
         specialised test helpers in :std:doc:`numpy:reference/routines.testing`
         if you need support for comparisons, NaNs, or ULP-based tolerances.
+
+        To match strings using regex, you can use
+        `Matches <https://github.com/asottile/re-assert#re_assertmatchespattern-str-args-kwargs>`_
+        from the
+        `re_assert package <https://github.com/asottile/re-assert>`_.
 
     .. warning::
 
@@ -778,7 +783,7 @@ def raises(
 
 
 @overload
-def raises(
+def raises(  # noqa: F811
     expected_exception: Union[Type[E], Tuple[Type[E], ...]],
     func: Callable[..., Any],
     *args: Any,
@@ -787,34 +792,38 @@ def raises(
     ...
 
 
-def raises(
+def raises(  # noqa: F811
     expected_exception: Union[Type[E], Tuple[Type[E], ...]], *args: Any, **kwargs: Any
 ) -> Union["RaisesContext[E]", _pytest._code.ExceptionInfo[E]]:
-    r"""Assert that a code block/function call raises ``expected_exception``
-    or raise a failure exception otherwise.
+    r"""Assert that a code block/function call raises an exception type, or one of its subclasses.
 
-    :kwparam match:
+    :param expected_exception:
+        The expected exception type, or a tuple if one of multiple possible
+        exception types are expected. Note that subclasses of the passed exceptions
+        will also match.
+
+    :kwparam str | re.Pattern[str] | None match:
         If specified, a string containing a regular expression,
         or a regular expression object, that is tested against the string
-        representation of the exception using :py:func:`re.search`. To match a literal
-        string that may contain :std:ref:`special characters <re-syntax>`, the pattern can
-        first be escaped with :py:func:`re.escape`.
+        representation of the exception and its :pep:`678` `__notes__`
+        using :func:`re.search`.
 
-        (This is only used when :py:func:`pytest.raises` is used as a context manager,
+        To match a literal string that may contain :ref:`special characters
+        <re-syntax>`, the pattern can first be escaped with :func:`re.escape`.
+
+        (This is only used when ``pytest.raises`` is used as a context manager,
         and passed through to the function otherwise.
-        When using :py:func:`pytest.raises` as a function, you can use:
+        When using ``pytest.raises`` as a function, you can use:
         ``pytest.raises(Exc, func, match="passed on").match("my pattern")``.)
 
-    .. currentmodule:: _pytest._code
-
     Use ``pytest.raises`` as a context manager, which will capture the exception of the given
-    type::
+    type, or any of its subclasses::
 
         >>> import pytest
         >>> with pytest.raises(ZeroDivisionError):
         ...    1/0
 
-    If the code block does not raise the expected exception (``ZeroDivisionError`` in the example
+    If the code block does not raise the expected exception (:class:`ZeroDivisionError` in the example
     above), or no exception at all, the check will fail instead.
 
     You can also use the keyword argument ``match`` to assert that the
@@ -826,6 +835,14 @@ def raises(
         >>> with pytest.raises(ValueError, match=r'must be \d+$'):
         ...     raise ValueError("value must be 42")
 
+    The ``match`` argument searches the formatted exception string, which includes any
+    `PEP-678 <https://peps.python.org/pep-0678/>`__ ``__notes__``:
+
+        >>> with pytest.raises(ValueError, match=r'had a note added'):  # doctest: +SKIP
+        ...    e = ValueError("value must be 42")
+        ...    e.add_note("had a note added")
+        ...    raise e
+
     The context manager produces an :class:`ExceptionInfo` object which can be used to inspect the
     details of the captured exception::
 
@@ -833,6 +850,20 @@ def raises(
         ...     raise ValueError("value must be 42")
         >>> assert exc_info.type is ValueError
         >>> assert exc_info.value.args[0] == "value must be 42"
+
+    .. warning::
+
+       Given that ``pytest.raises`` matches subclasses, be wary of using it to match :class:`Exception` like this::
+
+           with pytest.raises(Exception):  # Careful, this will catch ANY exception raised.
+                some_function()
+
+       Because :class:`Exception` is the base class of almost all exceptions, it is easy for this to hide
+       real bugs, where the user wrote this expecting a specific exception, but some other exception is being
+       raised due to a bug introduced during a refactoring.
+
+       Avoid using ``pytest.raises`` to catch :class:`Exception` unless certain that you really want to catch
+       **any** exception raised.
 
     .. note::
 
@@ -846,7 +877,7 @@ def raises(
            >>> with pytest.raises(ValueError) as exc_info:
            ...     if value > 10:
            ...         raise ValueError("value must be <= 10")
-           ...     assert exc_info.type is ValueError  # this will not execute
+           ...     assert exc_info.type is ValueError  # This will not execute.
 
        Instead, the following approach must be taken (note the difference in
        scope)::
@@ -864,6 +895,10 @@ def raises(
     some runs raise an exception and others do not.
 
     See :ref:`parametrizing_conditional_raising` for an example.
+
+    .. seealso::
+
+        :ref:`assertraises` for more examples and detailed discussion.
 
     **Legacy form**
 
@@ -900,11 +935,17 @@ def raises(
     """
     __tracebackhide__ = True
 
+    if not expected_exception:
+        raise ValueError(
+            f"Expected an exception type or a tuple of exception types, but got `{expected_exception!r}`. "
+            f"Raising exceptions is already understood as failing the test, so you don't need "
+            f"any special code to say 'this should never raise an exception'."
+        )
     if isinstance(expected_exception, type):
-        excepted_exceptions: Tuple[Type[E], ...] = (expected_exception,)
+        expected_exceptions: Tuple[Type[E], ...] = (expected_exception,)
     else:
-        excepted_exceptions = expected_exception
-    for exc in excepted_exceptions:
+        expected_exceptions = expected_exception
+    for exc in expected_exceptions:
         if not isinstance(exc, type) or not issubclass(exc, BaseException):
             msg = "expected exception must be a BaseException type, not {}"  # type: ignore[unreachable]
             not_a = exc.__name__ if isinstance(exc, type) else type(exc).__name__
@@ -927,11 +968,7 @@ def raises(
         try:
             func(*args[1:], **kwargs)
         except expected_exception as e:
-            # We just caught the exception - there is a traceback.
-            assert e.__traceback__ is not None
-            return _pytest._code.ExceptionInfo.from_exc_info(
-                (type(e), e, e.__traceback__)
-            )
+            return _pytest._code.ExceptionInfo.from_exception(e)
     fail(message)
 
 
@@ -940,7 +977,7 @@ raises.Exception = fail.Exception  # type: ignore
 
 
 @final
-class RaisesContext(Generic[E]):
+class RaisesContext(ContextManager[_pytest._code.ExceptionInfo[E]]):
     def __init__(
         self,
         expected_exception: Union[Type[E], Tuple[Type[E], ...]],

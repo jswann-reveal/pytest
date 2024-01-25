@@ -1,17 +1,17 @@
+from __future__ import annotations
+
 import importlib
 import io
 import operator
 import queue
+import re
 import sys
 import textwrap
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import Tuple
 from typing import TYPE_CHECKING
-from typing import Union
 
-import _pytest
+import _pytest._code
 import pytest
 from _pytest._code.code import ExceptionChainRepr
 from _pytest._code.code import ExceptionInfo
@@ -26,6 +26,9 @@ from _pytest.pytester import Pytester
 
 if TYPE_CHECKING:
     from _pytest._code.code import _TracebackStyle
+
+if sys.version_info[:2] < (3, 11):
+    from exceptiongroup import ExceptionGroup
 
 
 @pytest.fixture
@@ -51,6 +54,20 @@ def test_excinfo_from_exc_info_simple() -> None:
         assert e.__traceback__ is not None
         info = _pytest._code.ExceptionInfo.from_exc_info((type(e), e, e.__traceback__))
     assert info.type == ValueError
+
+
+def test_excinfo_from_exception_simple() -> None:
+    try:
+        raise ValueError
+    except ValueError as e:
+        assert e.__traceback__ is not None
+        info = _pytest._code.ExceptionInfo.from_exception(e)
+    assert info.type == ValueError
+
+
+def test_excinfo_from_exception_missing_traceback_assertion() -> None:
+    with pytest.raises(AssertionError, match=r"must have.*__traceback__"):
+        _pytest._code.ExceptionInfo.from_exception(ValueError())
 
 
 def test_excinfo_getstatement():
@@ -172,7 +189,7 @@ class TestTraceback_f_g_h:
 
     def test_traceback_filter(self):
         traceback = self.excinfo.traceback
-        ntraceback = traceback.filter()
+        ntraceback = traceback.filter(self.excinfo)
         assert len(ntraceback) == len(traceback) - 1
 
     @pytest.mark.parametrize(
@@ -203,7 +220,7 @@ class TestTraceback_f_g_h:
 
         excinfo = pytest.raises(ValueError, h)
         traceback = excinfo.traceback
-        ntraceback = traceback.filter()
+        ntraceback = traceback.filter(excinfo)
         print(f"old: {traceback!r}")
         print(f"new: {ntraceback!r}")
 
@@ -276,7 +293,7 @@ class TestTraceback_f_g_h:
         excinfo = pytest.raises(ValueError, fail)
         assert excinfo.traceback.recursionindex() is None
 
-    def test_traceback_getcrashentry(self):
+    def test_getreprcrash(self):
         def i():
             __tracebackhide__ = True
             raise ValueError
@@ -292,14 +309,13 @@ class TestTraceback_f_g_h:
             g()
 
         excinfo = pytest.raises(ValueError, f)
-        tb = excinfo.traceback
-        entry = tb.getcrashentry()
+        reprcrash = excinfo._getreprcrash()
+        assert reprcrash is not None
         co = _pytest._code.Code.from_function(h)
-        assert entry.frame.code.path == co.path
-        assert entry.lineno == co.firstlineno + 1
-        assert entry.frame.code.name == "h"
+        assert reprcrash.path == str(co.path)
+        assert reprcrash.lineno == co.firstlineno + 1 + 1
 
-    def test_traceback_getcrashentry_empty(self):
+    def test_getreprcrash_empty(self):
         def g():
             __tracebackhide__ = True
             raise ValueError
@@ -309,12 +325,7 @@ class TestTraceback_f_g_h:
             g()
 
         excinfo = pytest.raises(ValueError, f)
-        tb = excinfo.traceback
-        entry = tb.getcrashentry()
-        co = _pytest._code.Code.from_function(g)
-        assert entry.frame.code.path == co.path
-        assert entry.lineno == co.firstlineno + 2
-        assert entry.frame.code.name == "g"
+        assert excinfo._getreprcrash() is None
 
 
 def test_excinfo_exconly():
@@ -366,7 +377,7 @@ def test_excinfo_no_sourcecode():
 
 def test_excinfo_no_python_sourcecode(tmp_path: Path) -> None:
     # XXX: simplified locally testable version
-    tmp_path.joinpath("test.txt").write_text("{{ h()}}:")
+    tmp_path.joinpath("test.txt").write_text("{{ h()}}:", encoding="utf-8")
 
     jinja2 = pytest.importorskip("jinja2")
     loader = jinja2.FileSystemLoader(str(tmp_path))
@@ -420,18 +431,106 @@ def test_match_raises_error(pytester: Pytester) -> None:
             excinfo.match(r'[123]+')
     """
     )
-    result = pytester.runpytest()
+    result = pytester.runpytest("--tb=short")
     assert result.ret != 0
 
-    exc_msg = "Regex pattern '[[]123[]]+' does not match 'division by zero'."
-    result.stdout.fnmatch_lines([f"E * AssertionError: {exc_msg}"])
+    match = [
+        r"E .* AssertionError: Regex pattern did not match.",
+        r"E .* Regex: '\[123\]\+'",
+        r"E .* Input: 'division by zero'",
+    ]
+    result.stdout.re_match_lines(match)
     result.stdout.no_fnmatch_line("*__tracebackhide__ = True*")
 
     result = pytester.runpytest("--fulltrace")
     assert result.ret != 0
-    result.stdout.fnmatch_lines(
-        ["*__tracebackhide__ = True*", f"E * AssertionError: {exc_msg}"]
-    )
+    result.stdout.re_match_lines([r".*__tracebackhide__ = True.*", *match])
+
+
+class TestGroupContains:
+    def test_contains_exception_type(self) -> None:
+        exc_group = ExceptionGroup("", [RuntimeError()])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(RuntimeError)
+
+    def test_doesnt_contain_exception_type(self) -> None:
+        exc_group = ExceptionGroup("", [ValueError()])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert not exc_info.group_contains(RuntimeError)
+
+    def test_contains_exception_match(self) -> None:
+        exc_group = ExceptionGroup("", [RuntimeError("exception message")])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(RuntimeError, match=r"^exception message$")
+
+    def test_doesnt_contain_exception_match(self) -> None:
+        exc_group = ExceptionGroup("", [RuntimeError("message that will not match")])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert not exc_info.group_contains(RuntimeError, match=r"^exception message$")
+
+    def test_contains_exception_type_unlimited_depth(self) -> None:
+        exc_group = ExceptionGroup("", [ExceptionGroup("", [RuntimeError()])])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(RuntimeError)
+
+    def test_contains_exception_type_at_depth_1(self) -> None:
+        exc_group = ExceptionGroup("", [RuntimeError()])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(RuntimeError, depth=1)
+
+    def test_doesnt_contain_exception_type_past_depth(self) -> None:
+        exc_group = ExceptionGroup("", [ExceptionGroup("", [RuntimeError()])])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert not exc_info.group_contains(RuntimeError, depth=1)
+
+    def test_contains_exception_type_specific_depth(self) -> None:
+        exc_group = ExceptionGroup("", [ExceptionGroup("", [RuntimeError()])])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(RuntimeError, depth=2)
+
+    def test_contains_exception_match_unlimited_depth(self) -> None:
+        exc_group = ExceptionGroup(
+            "", [ExceptionGroup("", [RuntimeError("exception message")])]
+        )
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(RuntimeError, match=r"^exception message$")
+
+    def test_contains_exception_match_at_depth_1(self) -> None:
+        exc_group = ExceptionGroup("", [RuntimeError("exception message")])
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(
+            RuntimeError, match=r"^exception message$", depth=1
+        )
+
+    def test_doesnt_contain_exception_match_past_depth(self) -> None:
+        exc_group = ExceptionGroup(
+            "", [ExceptionGroup("", [RuntimeError("exception message")])]
+        )
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert not exc_info.group_contains(
+            RuntimeError, match=r"^exception message$", depth=1
+        )
+
+    def test_contains_exception_match_specific_depth(self) -> None:
+        exc_group = ExceptionGroup(
+            "", [ExceptionGroup("", [RuntimeError("exception message")])]
+        )
+        with pytest.raises(ExceptionGroup) as exc_info:
+            raise exc_group
+        assert exc_info.group_contains(
+            RuntimeError, match=r"^exception message$", depth=2
+        )
 
 
 class TestFormattedExcinfo:
@@ -441,7 +540,7 @@ class TestFormattedExcinfo:
             source = textwrap.dedent(source)
             modpath = tmp_path.joinpath("mod.py")
             tmp_path.joinpath("__init__.py").touch()
-            modpath.write_text(source)
+            modpath.write_text(source, encoding="utf-8")
             importlib.invalidate_caches()
             return import_path(modpath, root=tmp_path)
 
@@ -460,6 +559,24 @@ class TestFormattedExcinfo:
         assert len(lines) == 2
         assert lines[0] == "|   def f(x):"
         assert lines[1] == "        pass"
+
+    def test_repr_source_out_of_bounds(self):
+        pr = FormattedExcinfo()
+        source = _pytest._code.Source(
+            """\
+            def f(x):
+                pass
+            """
+        ).strip()
+        pr.flow_marker = "|"  # type: ignore[misc]
+
+        lines = pr.get_source(source, 100)
+        assert len(lines) == 1
+        assert lines[0] == "|   ???"
+
+        lines = pr.get_source(source, -100)
+        assert len(lines) == 1
+        assert lines[0] == "|   ???"
 
     def test_repr_source_excinfo(self) -> None:
         """Check if indentation is right."""
@@ -596,7 +713,7 @@ raise ValueError()
         """
         )
         excinfo = pytest.raises(ValueError, mod.func1)
-        excinfo.traceback = excinfo.traceback.filter()
+        excinfo.traceback = excinfo.traceback.filter(excinfo)
         p = FormattedExcinfo()
         reprtb = p.repr_traceback_entry(excinfo.traceback[-1])
 
@@ -629,7 +746,7 @@ raise ValueError()
         """
         )
         excinfo = pytest.raises(ValueError, mod.func1, "m" * 90, 5, 13, "z" * 120)
-        excinfo.traceback = excinfo.traceback.filter()
+        excinfo.traceback = excinfo.traceback.filter(excinfo)
         entry = excinfo.traceback[-1]
         p = FormattedExcinfo(funcargs=True)
         reprfuncargs = p.repr_args(entry)
@@ -656,7 +773,7 @@ raise ValueError()
         """
         )
         excinfo = pytest.raises(ValueError, mod.func1, "a", "b", c="d")
-        excinfo.traceback = excinfo.traceback.filter()
+        excinfo.traceback = excinfo.traceback.filter(excinfo)
         entry = excinfo.traceback[-1]
         p = FormattedExcinfo(funcargs=True)
         reprfuncargs = p.repr_args(entry)
@@ -737,7 +854,11 @@ raise ValueError()
         reprtb = p.repr_traceback(excinfo)
         assert len(reprtb.reprentries) == 3
 
-    def test_traceback_short_no_source(self, importasmod, monkeypatch) -> None:
+    def test_traceback_short_no_source(
+        self,
+        importasmod,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         mod = importasmod(
             """
             def func1():
@@ -749,14 +870,14 @@ raise ValueError()
         excinfo = pytest.raises(ValueError, mod.entry)
         from _pytest._code.code import Code
 
-        monkeypatch.setattr(Code, "path", "bogus")
-        p = FormattedExcinfo(style="short")
-        reprtb = p.repr_traceback_entry(excinfo.traceback[-2])
-        lines = reprtb.lines
-        last_p = FormattedExcinfo(style="short")
-        last_reprtb = last_p.repr_traceback_entry(excinfo.traceback[-1], excinfo)
-        last_lines = last_reprtb.lines
-        monkeypatch.undo()
+        with monkeypatch.context() as mp:
+            mp.setattr(Code, "path", "bogus")
+            p = FormattedExcinfo(style="short")
+            reprtb = p.repr_traceback_entry(excinfo.traceback[-2])
+            lines = reprtb.lines
+            last_p = FormattedExcinfo(style="short")
+            last_reprtb = last_p.repr_traceback_entry(excinfo.traceback[-1], excinfo)
+            last_lines = last_reprtb.lines
         assert lines[0] == "    func1()"
 
         assert last_lines[0] == '    raise ValueError("hello")'
@@ -773,7 +894,7 @@ raise ValueError()
         )
         excinfo = pytest.raises(ValueError, mod.entry)
 
-        styles: Tuple[_TracebackStyle, ...] = ("long", "short")
+        styles: tuple[_TracebackStyle, ...] = ("long", "short")
         for style in styles:
             p = FormattedExcinfo(style=style)
             reprtb = p.repr_traceback(excinfo)
@@ -900,7 +1021,7 @@ raise ValueError()
         )
         excinfo = pytest.raises(ValueError, mod.entry)
 
-        styles: Tuple[_TracebackStyle, ...] = ("short", "long", "no")
+        styles: tuple[_TracebackStyle, ...] = ("short", "long", "no")
         for style in styles:
             for showlocals in (True, False):
                 repr = excinfo.getrepr(style=style, showlocals=showlocals)
@@ -930,7 +1051,7 @@ raise ValueError()
         """
         )
         excinfo = pytest.raises(ValueError, mod.f)
-        excinfo.traceback = excinfo.traceback.filter()
+        excinfo.traceback = excinfo.traceback.filter(excinfo)
         repr = excinfo.getrepr()
         repr.toterminal(tw_mock)
         assert tw_mock.lines[0] == ""
@@ -964,7 +1085,7 @@ raise ValueError()
         )
         excinfo = pytest.raises(ValueError, mod.f)
         tmp_path.joinpath("mod.py").unlink()
-        excinfo.traceback = excinfo.traceback.filter()
+        excinfo.traceback = excinfo.traceback.filter(excinfo)
         repr = excinfo.getrepr()
         repr.toterminal(tw_mock)
         assert tw_mock.lines[0] == ""
@@ -995,8 +1116,8 @@ raise ValueError()
         """
         )
         excinfo = pytest.raises(ValueError, mod.f)
-        tmp_path.joinpath("mod.py").write_text("asdf")
-        excinfo.traceback = excinfo.traceback.filter()
+        tmp_path.joinpath("mod.py").write_text("asdf", encoding="utf-8")
+        excinfo.traceback = excinfo.traceback.filter(excinfo)
         repr = excinfo.getrepr()
         repr.toterminal(tw_mock)
         assert tw_mock.lines[0] == ""
@@ -1062,7 +1183,7 @@ raise ValueError()
             for funcargs in (True, False)
         ],
     )
-    def test_format_excinfo(self, reproptions: Dict[str, Any]) -> None:
+    def test_format_excinfo(self, reproptions: dict[str, Any]) -> None:
         def bar():
             assert False, "some error"
 
@@ -1093,9 +1214,11 @@ raise ValueError()
         """
         )
         excinfo = pytest.raises(ValueError, mod.f)
-        excinfo.traceback = excinfo.traceback.filter()
-        excinfo.traceback[1].set_repr_style("short")
-        excinfo.traceback[2].set_repr_style("short")
+        excinfo.traceback = excinfo.traceback.filter(excinfo)
+        excinfo.traceback = _pytest._code.Traceback(
+            entry if i not in (1, 2) else entry.with_repr_style("short")
+            for i, entry in enumerate(excinfo.traceback)
+        )
         r = excinfo.getrepr(style="long")
         r.toterminal(tw_mock)
         for line in tw_mock.lines:
@@ -1361,14 +1484,14 @@ raise ValueError()
         with pytest.raises(TypeError) as excinfo:
             mod.f()
         # previously crashed with `AttributeError: list has no attribute get`
-        excinfo.traceback.filter()
+        excinfo.traceback.filter(excinfo)
 
 
 @pytest.mark.parametrize("style", ["short", "long"])
 @pytest.mark.parametrize("encoding", [None, "utf8", "utf16"])
 def test_repr_traceback_with_unicode(style, encoding):
     if encoding is None:
-        msg: Union[str, bytes] = "☹"
+        msg: str | bytes = "☹"
     else:
         msg = "☹".encode(encoding)
     try:
@@ -1468,3 +1591,201 @@ def test_no_recursion_index_on_recursion_error():
     with pytest.raises(RuntimeError) as excinfo:
         RecursionDepthError().trigger
     assert "maximum recursion" in str(excinfo.getrepr())
+
+
+def _exceptiongroup_common(
+    pytester: Pytester,
+    outer_chain: str,
+    inner_chain: str,
+    native: bool,
+) -> None:
+    pre_raise = "exceptiongroup." if not native else ""
+    pre_catch = pre_raise if sys.version_info < (3, 11) else ""
+    filestr = f"""
+    {"import exceptiongroup" if not native else ""}
+    import pytest
+
+    def f(): raise ValueError("From f()")
+    def g(): raise BaseException("From g()")
+
+    def inner(inner_chain):
+        excs = []
+        for callback in [f, g]:
+            try:
+                callback()
+            except BaseException as err:
+                excs.append(err)
+        if excs:
+            if inner_chain == "none":
+                raise {pre_raise}BaseExceptionGroup("Oops", excs)
+            try:
+                raise SyntaxError()
+            except SyntaxError as e:
+                if inner_chain == "from":
+                    raise {pre_raise}BaseExceptionGroup("Oops", excs) from e
+                else:
+                    raise {pre_raise}BaseExceptionGroup("Oops", excs)
+
+    def outer(outer_chain, inner_chain):
+        try:
+            inner(inner_chain)
+        except {pre_catch}BaseExceptionGroup as e:
+            if outer_chain == "none":
+                raise
+            if outer_chain == "from":
+                raise IndexError() from e
+            else:
+                raise IndexError()
+
+
+    def test():
+        outer("{outer_chain}", "{inner_chain}")
+    """
+    pytester.makepyfile(test_excgroup=filestr)
+    result = pytester.runpytest()
+    match_lines = []
+    if inner_chain in ("another", "from"):
+        match_lines.append(r"SyntaxError: <no detail available>")
+
+    match_lines += [
+        r"  + Exception Group Traceback (most recent call last):",
+        rf"  \| {pre_catch}BaseExceptionGroup: Oops \(2 sub-exceptions\)",
+        r"    \| ValueError: From f\(\)",
+        r"    \| BaseException: From g\(\)",
+        r"=* short test summary info =*",
+    ]
+    if outer_chain in ("another", "from"):
+        match_lines.append(r"FAILED test_excgroup.py::test - IndexError")
+    else:
+        match_lines.append(
+            rf"FAILED test_excgroup.py::test - {pre_catch}BaseExceptionGroup: Oops \(2.*"
+        )
+    result.stdout.re_match_lines(match_lines)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="Native ExceptionGroup not implemented"
+)
+@pytest.mark.parametrize("outer_chain", ["none", "from", "another"])
+@pytest.mark.parametrize("inner_chain", ["none", "from", "another"])
+def test_native_exceptiongroup(pytester: Pytester, outer_chain, inner_chain) -> None:
+    _exceptiongroup_common(pytester, outer_chain, inner_chain, native=True)
+
+
+@pytest.mark.parametrize("outer_chain", ["none", "from", "another"])
+@pytest.mark.parametrize("inner_chain", ["none", "from", "another"])
+def test_exceptiongroup(pytester: Pytester, outer_chain, inner_chain) -> None:
+    # with py>=3.11 does not depend on exceptiongroup, though there is a toxenv for it
+    pytest.importorskip("exceptiongroup")
+    _exceptiongroup_common(pytester, outer_chain, inner_chain, native=False)
+
+
+@pytest.mark.parametrize("tbstyle", ("long", "short", "auto", "line", "native"))
+def test_all_entries_hidden(pytester: Pytester, tbstyle: str) -> None:
+    """Regression test for #10903."""
+    pytester.makepyfile(
+        """
+        def test():
+            __tracebackhide__ = True
+            1 / 0
+    """
+    )
+    result = pytester.runpytest("--tb", tbstyle)
+    assert result.ret == 1
+    if tbstyle != "line":
+        result.stdout.fnmatch_lines(["*ZeroDivisionError: division by zero"])
+    if tbstyle not in ("line", "native"):
+        result.stdout.fnmatch_lines(["All traceback entries are hidden.*"])
+
+
+def test_hidden_entries_of_chained_exceptions_are_not_shown(pytester: Pytester) -> None:
+    """Hidden entries of chained exceptions are not shown (#1904)."""
+    p = pytester.makepyfile(
+        """
+        def g1():
+            __tracebackhide__ = True
+            str.does_not_exist
+
+        def f3():
+            __tracebackhide__ = True
+            1 / 0
+
+        def f2():
+            try:
+                f3()
+            except Exception:
+                g1()
+
+        def f1():
+            __tracebackhide__ = True
+            f2()
+
+        def test():
+            f1()
+        """
+    )
+    result = pytester.runpytest(str(p), "--tb=short")
+    assert result.ret == 1
+    result.stdout.fnmatch_lines(
+        [
+            "*.py:11: in f2",
+            "    f3()",
+            "E   ZeroDivisionError: division by zero",
+            "",
+            "During handling of the above exception, another exception occurred:",
+            "*.py:20: in test",
+            "    f1()",
+            "*.py:13: in f2",
+            "    g1()",
+            "E   AttributeError:*'does_not_exist'",
+        ],
+        consecutive=True,
+    )
+
+
+def add_note(err: BaseException, msg: str) -> None:
+    """Adds a note to an exception inplace."""
+    if sys.version_info < (3, 11):
+        err.__notes__ = getattr(err, "__notes__", []) + [msg]  # type: ignore[attr-defined]
+    else:
+        err.add_note(msg)
+
+
+@pytest.mark.parametrize(
+    "error,notes,match",
+    [
+        (Exception("test"), [], "test"),
+        (AssertionError("foo"), ["bar"], "bar"),
+        (AssertionError("foo"), ["bar", "baz"], "bar"),
+        (AssertionError("foo"), ["bar", "baz"], "baz"),
+        (ValueError("foo"), ["bar", "baz"], re.compile(r"bar\nbaz", re.MULTILINE)),
+        (ValueError("foo"), ["bar", "baz"], re.compile(r"BAZ", re.IGNORECASE)),
+    ],
+)
+def test_check_error_notes_success(
+    error: Exception, notes: list[str], match: str
+) -> None:
+    for note in notes:
+        add_note(error, note)
+
+    with pytest.raises(Exception, match=match):
+        raise error
+
+
+@pytest.mark.parametrize(
+    "error, notes, match",
+    [
+        (Exception("test"), [], "foo"),
+        (AssertionError("foo"), ["bar"], "baz"),
+        (AssertionError("foo"), ["bar"], "foo\nbaz"),
+    ],
+)
+def test_check_error_notes_failure(
+    error: Exception, notes: list[str], match: str
+) -> None:
+    for note in notes:
+        add_note(error, note)
+
+    with pytest.raises(AssertionError):
+        with pytest.raises(type(error), match=match):
+            raise error

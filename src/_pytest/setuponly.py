@@ -18,47 +18,52 @@ def pytest_addoption(parser: Parser) -> None:
         "--setuponly",
         "--setup-only",
         action="store_true",
-        help="only setup fixtures, do not execute tests.",
+        help="Only setup fixtures, do not execute tests",
     )
     group.addoption(
         "--setupshow",
         "--setup-show",
         action="store_true",
-        help="show setup of fixtures while executing tests.",
+        help="Show setup of fixtures while executing tests",
     )
 
 
-@pytest.hookimpl(hookwrapper=True)
+@pytest.hookimpl(wrapper=True)
 def pytest_fixture_setup(
     fixturedef: FixtureDef[object], request: SubRequest
-) -> Generator[None, None, None]:
-    yield
-    if request.config.option.setupshow:
-        if hasattr(request, "param"):
-            # Save the fixture parameter so ._show_fixture_action() can
-            # display it now and during the teardown (in .finish()).
-            if fixturedef.ids:
-                if callable(fixturedef.ids):
-                    param = fixturedef.ids(request.param)
+) -> Generator[None, object, object]:
+    try:
+        return (yield)
+    finally:
+        if request.config.option.setupshow:
+            if hasattr(request, "param"):
+                # Save the fixture parameter so ._show_fixture_action() can
+                # display it now and during the teardown (in .finish()).
+                if fixturedef.ids:
+                    if callable(fixturedef.ids):
+                        param = fixturedef.ids(request.param)
+                    else:
+                        param = fixturedef.ids[request.param_index]
                 else:
-                    param = fixturedef.ids[request.param_index]
-            else:
-                param = request.param
-            fixturedef.cached_param = param  # type: ignore[attr-defined]
-        _show_fixture_action(fixturedef, "SETUP")
+                    param = request.param
+                fixturedef.cached_param = param  # type: ignore[attr-defined]
+            _show_fixture_action(fixturedef, request.config, "SETUP")
 
 
-def pytest_fixture_post_finalizer(fixturedef: FixtureDef[object]) -> None:
+def pytest_fixture_post_finalizer(
+    fixturedef: FixtureDef[object], request: SubRequest
+) -> None:
     if fixturedef.cached_result is not None:
-        config = fixturedef._fixturemanager.config
+        config = request.config
         if config.option.setupshow:
-            _show_fixture_action(fixturedef, "TEARDOWN")
+            _show_fixture_action(fixturedef, request.config, "TEARDOWN")
             if hasattr(fixturedef, "cached_param"):
                 del fixturedef.cached_param  # type: ignore[attr-defined]
 
 
-def _show_fixture_action(fixturedef: FixtureDef[object], msg: str) -> None:
-    config = fixturedef._fixturemanager.config
+def _show_fixture_action(
+    fixturedef: FixtureDef[object], config: Config, msg: str
+) -> None:
     capman = config.pluginmanager.getplugin("capturemanager")
     if capman:
         capman.suspend_global_capture()

@@ -1,11 +1,13 @@
 :orphan:
 
-..
-    .. sidebar:: Next Open Trainings
+.. sidebar:: Next Open Trainings and Events
 
-       - `Professional Testing with Python <https://www.python-academy.com/courses/specialtopics/python_course_testing.html>`_, via `Python Academy <https://www.python-academy.com/>`_, February 1st to 3rd, 2022, Leipzig (Germany) and remote.
+   - `Professional Testing with Python <https://python-academy.com/courses/python_course_testing.html>`_, via `Python Academy <https://www.python-academy.com/>`_ (3 day in-depth training):
+      * **June 11th to 13th 2024**, Remote
+      * **March 4th to 6th 2025**, Leipzig, Germany / Remote
+   - `pytest development sprint <https://github.com/pytest-dev/pytest/discussions/11655>`_, June 2024 (`date poll <https://nuudel.digitalcourage.de/2tEsEpRcwMNcAXVO>`_)
 
-       Also see `previous talks and blogposts <talks.html>`_.
+   Also see :doc:`previous talks and blogposts <talks>`.
 
 .. _features:
 
@@ -18,11 +20,9 @@ The ``pytest`` framework makes it easy to write small, readable tests, and can
 scale to support complex functional testing for applications and libraries.
 
 
-``pytest`` requires: Python 3.7+ or PyPy3.
+``pytest`` requires: Python 3.8+ or PyPy3.
 
 **PyPI package name**: :pypi:`pytest`
-
-**Documentation as PDF**: `download latest <https://media.readthedocs.org/pdf/pytest/latest/pytest.pdf>`_
 
 
 A quick example
@@ -45,7 +45,7 @@ To execute it:
 
     $ pytest
     =========================== test session starts ============================
-    platform linux -- Python 3.x.y, pytest-7.x.y, pluggy-1.x.y
+    platform linux -- Python 3.x.y, pytest-8.x.y, pluggy-1.x.y
     rootdir: /home/sweet/project
     collected 1 item
 
@@ -77,9 +77,9 @@ Features
 
 - :ref:`Modular fixtures <fixture>` for managing small or parametrized long-lived test resources
 
-- Can run :ref:`unittest <unittest>` (including trial) and :ref:`nose <noseintegration>` test suites out of the box
+- Can run :ref:`unittest <unittest>` (including trial) test suites out of the box
 
-- Python 3.7+ or PyPy 3
+- Python 3.8+ or PyPy 3
 
 - Rich plugin architecture, with over 800+ :ref:`external plugins <plugin-list>` and thriving community
 
@@ -98,11 +98,6 @@ Bugs/Requests
 
 Please use the `GitHub issue tracker <https://github.com/pytest-dev/pytest/issues>`_ to submit bugs or request features.
 
-
-Changelog
----------
-
-Consult the :ref:`Changelog <changelog>` page for fixes and enhancements of each version.
 
 Support pytest
 --------------
@@ -136,13 +131,3 @@ Security
 pytest has never been associated with a security vulnerability, but in any case, to report a
 security vulnerability please use the `Tidelift security contact <https://tidelift.com/security>`_.
 Tidelift will coordinate the fix and disclosure.
-
-
-License
--------
-
-Copyright Holger Krekel and others, 2004.
-
-Distributed under the terms of the `MIT`_ license, pytest is free and open source software.
-
-.. _`MIT`: https://github.com/pytest-dev/pytest/blob/main/LICENSE

@@ -28,7 +28,7 @@ from _pytest.stash import Stash
 def schema() -> xmlschema.XMLSchema:
     """Return an xmlschema.XMLSchema object for the junit-10.xsd file."""
     fn = Path(__file__).parent / "example_scripts/junit-10.xsd"
-    with fn.open() as f:
+    with fn.open(encoding="utf-8") as f:
         return xmlschema.XMLSchema(f)
 
 
@@ -45,7 +45,7 @@ class RunAndParse:
         xml_path = self.pytester.path.joinpath("junit.xml")
         result = self.pytester.runpytest("--junitxml=%s" % xml_path, *args)
         if family == "xunit2":
-            with xml_path.open() as f:
+            with xml_path.open(encoding="utf-8") as f:
                 self.schema.validate(f)
         xmldoc = minidom.parse(str(xml_path))
         return result, DomNode(xmldoc)
@@ -253,7 +253,6 @@ class TestPython:
         duration_report: str,
         run_and_parse: RunAndParse,
     ) -> None:
-
         # mock LogXML.node_reporter so it always sets a known duration to each test report object
         original_node_reporter = LogXML.node_reporter
 
@@ -470,7 +469,7 @@ class TestPython:
         self, pytester: Pytester, run_and_parse: RunAndParse, xunit_family: str
     ) -> None:
         p = pytester.mkdir("sub").joinpath("test_hello.py")
-        p.write_text("def test_func(): 0/0")
+        p.write_text("def test_func(): 0/0", encoding="utf-8")
         result, dom = run_and_parse(family=xunit_family)
         assert result.ret
         node = dom.find_first_by_tag("testsuite")
@@ -603,7 +602,6 @@ class TestPython:
         node.assert_attr(failures=3, tests=3)
 
         for index, char in enumerate("<&'"):
-
             tnode = node.find_nth_by_tag("testcase", index)
             tnode.assert_attr(
                 classname="test_failure_escape", name="test_func[%s]" % char
@@ -989,7 +987,7 @@ class TestNonPython:
                     return "custom item runtest failed"
         """
         )
-        pytester.path.joinpath("myfile.xyz").write_text("hello")
+        pytester.path.joinpath("myfile.xyz").write_text("hello", encoding="utf-8")
         result, dom = run_and_parse(family=xunit_family)
         assert result.ret
         node = dom.find_first_by_tag("testsuite")
@@ -1015,7 +1013,7 @@ def test_nullbyte(pytester: Pytester, junit_logging: str) -> None:
     )
     xmlf = pytester.path.joinpath("junit.xml")
     pytester.runpytest("--junitxml=%s" % xmlf, "-o", "junit_logging=%s" % junit_logging)
-    text = xmlf.read_text()
+    text = xmlf.read_text(encoding="utf-8")
     assert "\x00" not in text
     if junit_logging == "system-out":
         assert "#x00" in text
@@ -1037,7 +1035,7 @@ def test_nullbyte_replace(pytester: Pytester, junit_logging: str) -> None:
     )
     xmlf = pytester.path.joinpath("junit.xml")
     pytester.runpytest("--junitxml=%s" % xmlf, "-o", "junit_logging=%s" % junit_logging)
-    text = xmlf.read_text()
+    text = xmlf.read_text(encoding="utf-8")
     if junit_logging == "system-out":
         assert "#x0" in text
     if junit_logging == "no":
@@ -1228,6 +1226,36 @@ def test_record_property(pytester: Pytester, run_and_parse: RunAndParse) -> None
     pnodes[0].assert_attr(name="bar", value="1")
     pnodes[1].assert_attr(name="foo", value="<1")
     result.stdout.fnmatch_lines(["*= 1 passed in *"])
+
+
+def test_record_property_on_test_and_teardown_failure(
+    pytester: Pytester, run_and_parse: RunAndParse
+) -> None:
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.fixture
+        def other(record_property):
+            record_property("bar", 1)
+            yield
+            assert 0
+
+        def test_record(record_property, other):
+            record_property("foo", "<1")
+            assert 0
+    """
+    )
+    result, dom = run_and_parse()
+    node = dom.find_first_by_tag("testsuite")
+    tnodes = node.find_by_tag("testcase")
+    for tnode in tnodes:
+        psnode = tnode.find_first_by_tag("properties")
+        assert psnode, f"testcase didn't had expected properties:\n{tnode}"
+        pnodes = psnode.find_by_tag("property")
+        pnodes[0].assert_attr(name="bar", value="1")
+        pnodes[1].assert_attr(name="foo", value="<1")
+    result.stdout.fnmatch_lines(["*= 1 failed, 1 error *"])
 
 
 def test_record_property_same_name(
@@ -1623,6 +1651,45 @@ def test_escaped_skipreason_issue3533(
     snode = node.find_first_by_tag("skipped")
     assert "1 <> 2" in snode.text
     snode.assert_attr(message="1 <> 2")
+
+
+def test_bin_escaped_skipreason(pytester: Pytester, run_and_parse: RunAndParse) -> None:
+    """Escape special characters from mark.skip reason (#11842)."""
+    pytester.makepyfile(
+        """
+        import pytest
+        @pytest.mark.skip("\33[31;1mred\33[0m")
+        def test_skip():
+            pass
+    """
+    )
+    _, dom = run_and_parse()
+    node = dom.find_first_by_tag("testcase")
+    snode = node.find_first_by_tag("skipped")
+    assert "#x1B[31;1mred#x1B[0m" in snode.text
+    snode.assert_attr(message="#x1B[31;1mred#x1B[0m")
+
+
+def test_escaped_setup_teardown_error(
+    pytester: Pytester, run_and_parse: RunAndParse
+) -> None:
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.fixture()
+        def my_setup():
+            raise Exception("error: \033[31mred\033[m")
+
+        def test_esc(my_setup):
+            pass
+    """
+    )
+    _, dom = run_and_parse()
+    node = dom.find_first_by_tag("testcase")
+    snode = node.find_first_by_tag("error")
+    assert "#x1B[31mred#x1B[m" in snode["message"]
+    assert "#x1B[31mred#x1B[m" in snode.text
 
 
 @parametrize_families

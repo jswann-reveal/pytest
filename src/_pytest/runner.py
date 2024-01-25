@@ -1,20 +1,21 @@
 """Basic collect and runtest protocol implementations."""
 import bdb
+import dataclasses
 import os
 import sys
 from typing import Callable
 from typing import cast
 from typing import Dict
+from typing import final
 from typing import Generic
 from typing import List
+from typing import Literal
 from typing import Optional
 from typing import Tuple
 from typing import Type
 from typing import TYPE_CHECKING
 from typing import TypeVar
 from typing import Union
-
-import attr
 
 from .reports import BaseReport
 from .reports import CollectErrorRepr
@@ -24,10 +25,10 @@ from _pytest import timing
 from _pytest._code.code import ExceptionChainRepr
 from _pytest._code.code import ExceptionInfo
 from _pytest._code.code import TerminalRepr
-from _pytest.compat import final
 from _pytest.config.argparsing import Parser
 from _pytest.deprecated import check_ispytest
 from _pytest.nodes import Collector
+from _pytest.nodes import Directory
 from _pytest.nodes import Item
 from _pytest.nodes import Node
 from _pytest.outcomes import Exit
@@ -35,9 +36,10 @@ from _pytest.outcomes import OutcomeException
 from _pytest.outcomes import Skipped
 from _pytest.outcomes import TEST_OUTCOME
 
-if TYPE_CHECKING:
-    from typing_extensions import Literal
+if sys.version_info[:2] < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
+if TYPE_CHECKING:
     from _pytest.main import Session
     from _pytest.terminal import TerminalReporter
 
@@ -46,14 +48,14 @@ if TYPE_CHECKING:
 
 
 def pytest_addoption(parser: Parser) -> None:
-    group = parser.getgroup("terminal reporting", "reporting", after="general")
+    group = parser.getgroup("terminal reporting", "Reporting", after="general")
     group.addoption(
         "--durations",
         action="store",
         type=int,
         default=None,
         metavar="N",
-        help="show N slowest setup/test durations (N=0 for all).",
+        help="Show N slowest setup/test durations (N=0 for all)",
     )
     group.addoption(
         "--durations-min",
@@ -61,7 +63,8 @@ def pytest_addoption(parser: Parser) -> None:
         type=float,
         default=0.005,
         metavar="N",
-        help="Minimal duration in seconds for inclusion in slowest list. Default 0.005",
+        help="Minimal duration in seconds for inclusion in slowest list. "
+        "Default: 0.005.",
     )
 
 
@@ -128,6 +131,10 @@ def runtestprotocol(
             show_test_item(item)
         if not item.config.getoption("setuponly", False):
             reports.append(call_and_report(item, "call", log))
+    # If the session is about to fail or stop, teardown everything - this is
+    # necessary to correctly report fixture teardown errors (see #11706)
+    if item.session.shouldfail or item.session.shouldstop:
+        nextitem = None
     reports.append(call_and_report(item, "teardown", log, nextitem=nextitem))
     # After all teardown hooks have been called
     # want funcargs and request info to go away.
@@ -181,7 +188,7 @@ def pytest_runtest_teardown(item: Item, nextitem: Optional[Item]) -> None:
 
 
 def _update_current_test_var(
-    item: Item, when: Optional["Literal['setup', 'call', 'teardown']"]
+    item: Item, when: Optional[Literal["setup", "call", "teardown"]]
 ) -> None:
     """Update :envvar:`PYTEST_CURRENT_TEST` to reflect the current item and stage.
 
@@ -214,15 +221,28 @@ def pytest_report_teststatus(report: BaseReport) -> Optional[Tuple[str, str, str
 
 
 def call_and_report(
-    item: Item, when: "Literal['setup', 'call', 'teardown']", log: bool = True, **kwds
+    item: Item, when: Literal["setup", "call", "teardown"], log: bool = True, **kwds
 ) -> TestReport:
-    call = call_runtest_hook(item, when, **kwds)
-    hook = item.ihook
-    report: TestReport = hook.pytest_runtest_makereport(item=item, call=call)
+    ihook = item.ihook
+    if when == "setup":
+        runtest_hook: Callable[..., None] = ihook.pytest_runtest_setup
+    elif when == "call":
+        runtest_hook = ihook.pytest_runtest_call
+    elif when == "teardown":
+        runtest_hook = ihook.pytest_runtest_teardown
+    else:
+        assert False, f"Unhandled runtest hook case: {when}"
+    reraise: Tuple[Type[BaseException], ...] = (Exit,)
+    if not item.config.getoption("usepdb", False):
+        reraise += (KeyboardInterrupt,)
+    call = CallInfo.from_call(
+        lambda: runtest_hook(item=item, **kwds), when=when, reraise=reraise
+    )
+    report: TestReport = ihook.pytest_runtest_makereport(item=item, call=call)
     if log:
-        hook.pytest_runtest_logreport(report=report)
+        ihook.pytest_runtest_logreport(report=report)
     if check_interactive_exception(call, report):
-        hook.pytest_exception_interact(node=item, call=call, report=report)
+        ihook.pytest_exception_interact(node=item, call=call, report=report)
     return report
 
 
@@ -241,30 +261,11 @@ def check_interactive_exception(call: "CallInfo[object]", report: BaseReport) ->
     return True
 
 
-def call_runtest_hook(
-    item: Item, when: "Literal['setup', 'call', 'teardown']", **kwds
-) -> "CallInfo[None]":
-    if when == "setup":
-        ihook: Callable[..., None] = item.ihook.pytest_runtest_setup
-    elif when == "call":
-        ihook = item.ihook.pytest_runtest_call
-    elif when == "teardown":
-        ihook = item.ihook.pytest_runtest_teardown
-    else:
-        assert False, f"Unhandled runtest hook case: {when}"
-    reraise: Tuple[Type[BaseException], ...] = (Exit,)
-    if not item.config.getoption("usepdb", False):
-        reraise += (KeyboardInterrupt,)
-    return CallInfo.from_call(
-        lambda: ihook(item=item, **kwds), when=when, reraise=reraise
-    )
-
-
 TResult = TypeVar("TResult", covariant=True)
 
 
 @final
-@attr.s(repr=False, init=False, auto_attribs=True)
+@dataclasses.dataclass
 class CallInfo(Generic[TResult]):
     """Result/Exception info of a function invocation."""
 
@@ -278,7 +279,7 @@ class CallInfo(Generic[TResult]):
     #: The call duration, in seconds.
     duration: float
     #: The context of invocation: "collect", "setup", "call" or "teardown".
-    when: "Literal['collect', 'setup', 'call', 'teardown']"
+    when: Literal["collect", "setup", "call", "teardown"]
 
     def __init__(
         self,
@@ -287,7 +288,7 @@ class CallInfo(Generic[TResult]):
         start: float,
         stop: float,
         duration: float,
-        when: "Literal['collect', 'setup', 'call', 'teardown']",
+        when: Literal["collect", "setup", "call", "teardown"],
         *,
         _ispytest: bool = False,
     ) -> None:
@@ -315,8 +316,8 @@ class CallInfo(Generic[TResult]):
     @classmethod
     def from_call(
         cls,
-        func: "Callable[[], TResult]",
-        when: "Literal['collect', 'setup', 'call', 'teardown']",
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
         reraise: Optional[
             Union[Type[BaseException], Tuple[Type[BaseException], ...]]
         ] = None,
@@ -366,7 +367,23 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]) -> TestReport:
 
 
 def pytest_make_collect_report(collector: Collector) -> CollectReport:
-    call = CallInfo.from_call(lambda: list(collector.collect()), "collect")
+    def collect() -> List[Union[Item, Collector]]:
+        # Before collecting, if this is a Directory, load the conftests.
+        # If a conftest import fails to load, it is considered a collection
+        # error of the Directory collector. This is why it's done inside of the
+        # CallInfo wrapper.
+        #
+        # Note: initial conftests are loaded early, not here.
+        if isinstance(collector, Directory):
+            collector.config.pluginmanager._loadconftestmodules(
+                collector.path,
+                collector.config.getoption("importmode"),
+                rootpath=collector.config.rootpath,
+            )
+
+        return list(collector.collect())
+
+    call = CallInfo.from_call(collect, "collect")
     longrepr: Union[None, Tuple[str, int, str], str, TerminalRepr] = None
     if not call.excinfo:
         outcome: Literal["passed", "skipped", "failed"] = "passed"
@@ -511,22 +528,29 @@ class SetupState:
         stack is torn down.
         """
         needed_collectors = nextitem and nextitem.listchain() or []
-        exc = None
+        exceptions: List[BaseException] = []
         while self.stack:
             if list(self.stack.keys()) == needed_collectors[: len(self.stack)]:
                 break
             node, (finalizers, _) = self.stack.popitem()
+            these_exceptions = []
             while finalizers:
                 fin = finalizers.pop()
                 try:
                     fin()
                 except TEST_OUTCOME as e:
-                    # XXX Only first exception will be seen by user,
-                    #     ideally all should be reported.
-                    if exc is None:
-                        exc = e
-        if exc:
-            raise exc
+                    these_exceptions.append(e)
+
+            if len(these_exceptions) == 1:
+                exceptions.extend(these_exceptions)
+            elif these_exceptions:
+                msg = f"errors while tearing down {node!r}"
+                exceptions.append(BaseExceptionGroup(msg, these_exceptions[::-1]))
+
+        if len(exceptions) == 1:
+            raise exceptions[0]
+        elif exceptions:
+            raise BaseExceptionGroup("errors during test teardown", exceptions[::-1])
         if nextitem is None:
             assert not self.stack
 

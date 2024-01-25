@@ -1,4 +1,7 @@
 """Python version compatibility code."""
+from __future__ import annotations
+
+import dataclasses
 import enum
 import functools
 import inspect
@@ -9,36 +12,13 @@ from inspect import signature
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Generic
-from typing import Optional
-from typing import Tuple
-from typing import TYPE_CHECKING
+from typing import Final
+from typing import NoReturn
 from typing import TypeVar
-from typing import Union
-
-import attr
-import py
-
-if TYPE_CHECKING:
-    from typing import NoReturn
-    from typing_extensions import Final
 
 
 _T = TypeVar("_T")
 _S = TypeVar("_S")
-
-#: constant to prepare valuing pylib path replacements/lazy proxies later on
-#  intended for removal in pytest 8.0 or 9.0
-
-# fmt: off
-# intentional space to create a fake difference for the verification
-LEGACY_PATH = py.path. local
-# fmt: on
-
-
-def legacy_path(path: Union[str, "os.PathLike[str]"]) -> LEGACY_PATH:
-    """Internal wrapper to prepare lazy proxies for legacy_path instances"""
-    return LEGACY_PATH(path)
 
 
 # fmt: off
@@ -46,17 +26,8 @@ def legacy_path(path: Union[str, "os.PathLike[str]"]) -> LEGACY_PATH:
 # https://www.python.org/dev/peps/pep-0484/#support-for-singleton-types-in-unions
 class NotSetType(enum.Enum):
     token = 0
-NOTSET: "Final" = NotSetType.token  # noqa: E305
+NOTSET: Final = NotSetType.token  # noqa: E305
 # fmt: on
-
-if sys.version_info >= (3, 8):
-    from importlib import metadata as importlib_metadata
-else:
-    import importlib_metadata  # noqa: F401
-
-
-def _format_args(func: Callable[..., Any]) -> str:
-    return str(signature(func))
 
 
 def is_generator(func: object) -> bool:
@@ -82,7 +53,7 @@ def is_async_function(func: object) -> bool:
     return iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
 
 
-def getlocation(function, curdir: Optional[str] = None) -> str:
+def getlocation(function, curdir: str | os.PathLike[str] | None = None) -> str:
     function = get_real_func(function)
     fn = Path(inspect.getfile(function))
     lineno = function.__code__.co_firstlineno
@@ -116,12 +87,12 @@ def num_mock_patch_args(function) -> int:
 
 
 def getfuncargnames(
-    function: Callable[..., Any],
+    function: Callable[..., object],
     *,
     name: str = "",
     is_method: bool = False,
-    cls: Optional[type] = None,
-) -> Tuple[str, ...]:
+    cls: type | None = None,
+) -> tuple[str, ...]:
     """Return the names of a function's mandatory arguments.
 
     Should return the names of all function arguments that:
@@ -185,7 +156,7 @@ def getfuncargnames(
     return arg_names
 
 
-def get_default_arg_names(function: Callable[..., Any]) -> Tuple[str, ...]:
+def get_default_arg_names(function: Callable[..., Any]) -> tuple[str, ...]:
     # Note: this code intentionally mirrors the code at the beginning of
     # getfuncargnames, to get the arguments which were excluded from its result
     # because they had default values.
@@ -216,7 +187,7 @@ def _bytes_to_ascii(val: bytes) -> str:
     return val.decode("ascii", "backslashreplace")
 
 
-def ascii_escaped(val: Union[bytes, str]) -> str:
+def ascii_escaped(val: bytes | str) -> str:
     r"""If val is pure ASCII, return it as an str, otherwise, escape
     bytes objects into a sequence of escaped bytes:
 
@@ -240,7 +211,7 @@ def ascii_escaped(val: Union[bytes, str]) -> str:
     return _translate_non_printable(ret)
 
 
-@attr.s
+@dataclasses.dataclass
 class _PytestWrapper:
     """Dummy wrapper around a function object for internal use only.
 
@@ -249,7 +220,7 @@ class _PytestWrapper:
     decorator to issue warnings when the fixture function is called directly.
     """
 
-    obj = attr.ib()
+    obj: Any
 
 
 def get_real_func(obj):
@@ -327,47 +298,25 @@ def safe_isclass(obj: object) -> bool:
         return False
 
 
-if TYPE_CHECKING:
-    if sys.version_info >= (3, 8):
-        from typing import final as final
+def get_user_id() -> int | None:
+    """Return the current process's real user id or None if it could not be
+    determined.
+
+    :return: The user id or None if it could not be determined.
+    """
+    # mypy follows the version and platform checking expectation of PEP 484:
+    # https://mypy.readthedocs.io/en/stable/common_issues.html?highlight=platform#python-version-and-system-platform-checks
+    # Containment checks are too complex for mypy v1.5.0 and cause failure.
+    if sys.platform == "win32" or sys.platform == "emscripten":
+        # win32 does not have a getuid() function.
+        # Emscripten has a return 0 stub.
+        return None
     else:
-        from typing_extensions import final as final
-elif sys.version_info >= (3, 8):
-    from typing import final as final
-else:
-
-    def final(f):
-        return f
-
-
-if sys.version_info >= (3, 8):
-    from functools import cached_property as cached_property
-else:
-    from typing import overload
-    from typing import Type
-
-    class cached_property(Generic[_S, _T]):
-        __slots__ = ("func", "__doc__")
-
-        def __init__(self, func: Callable[[_S], _T]) -> None:
-            self.func = func
-            self.__doc__ = func.__doc__
-
-        @overload
-        def __get__(
-            self, instance: None, owner: Optional[Type[_S]] = ...
-        ) -> "cached_property[_S, _T]":
-            ...
-
-        @overload
-        def __get__(self, instance: _S, owner: Optional[Type[_S]] = ...) -> _T:
-            ...
-
-        def __get__(self, instance, owner=None):
-            if instance is None:
-                return self
-            value = instance.__dict__[self.func.__name__] = self.func(instance)
-            return value
+        # On other platforms, a return value of -1 is assumed to indicate that
+        # the current process's real user id could not be determined.
+        ERROR = -1
+        uid = os.getuid()
+        return uid if uid != ERROR else None
 
 
 # Perform exhaustiveness checking.
@@ -401,5 +350,5 @@ else:
 # previously.
 #
 # This also work for Enums (if you use `is` to compare) and Literals.
-def assert_never(value: "NoReturn") -> "NoReturn":
+def assert_never(value: NoReturn) -> NoReturn:
     assert False, f"Unhandled value: {value} ({type(value).__name__})"

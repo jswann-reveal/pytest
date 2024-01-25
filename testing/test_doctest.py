@@ -113,6 +113,28 @@ class TestDoctests:
         reprec = pytester.inline_run(p)
         reprec.assertoutcome(failed=1)
 
+    def test_importmode(self, pytester: Pytester):
+        pytester.makepyfile(
+            **{
+                "namespacepkg/innerpkg/__init__.py": "",
+                "namespacepkg/innerpkg/a.py": """
+                  def some_func():
+                    return 42
+                """,
+                "namespacepkg/innerpkg/b.py": """
+                  from namespacepkg.innerpkg.a import some_func
+                  def my_func():
+                    '''
+                    >>> my_func()
+                    42
+                    '''
+                    return some_func()
+                """,
+            }
+        )
+        reprec = pytester.inline_run("--doctest-modules", "--import-mode=importlib")
+        reprec.assertoutcome(passed=1)
+
     def test_new_pattern(self, pytester: Pytester):
         p = pytester.maketxtfile(
             xdoc="""
@@ -201,7 +223,11 @@ class TestDoctests:
                 "Traceback (most recent call last):",
                 '  File "*/doctest.py", line *, in __run',
                 "    *",
-                *((" *^^^^*",) if sys.version_info >= (3, 11) else ()),
+                *(
+                    (" *^^^^*",)
+                    if (3, 11, 0, "beta", 4) > sys.version_info >= (3, 11)
+                    else ()
+                ),
                 '  File "<doctest test_doctest_unexpected_exception.txt[1]>", line 1, in <module>',
                 "ZeroDivisionError: division by zero",
                 "*/test_doctest_unexpected_exception.txt:2: UnexpectedException",
@@ -331,7 +357,8 @@ class TestDoctests:
                         >>> 1/0
                         '''
                 """
-            )
+            ),
+            encoding="utf-8",
         )
         result = pytester.runpytest("--doctest-modules")
         result.stdout.fnmatch_lines(
@@ -422,7 +449,8 @@ class TestDoctests:
                 """\
                 import asdalsdkjaslkdjasd
                 """
-            )
+            ),
+            encoding="utf-8",
         )
         pytester.maketxtfile(
             """
@@ -454,6 +482,24 @@ class TestDoctests:
         reprec = pytester.inline_run(p, "--doctest-modules")
         reprec.assertoutcome(failed=1)
 
+    def test_doctest_cached_property(self, pytester: Pytester):
+        p = pytester.makepyfile(
+            """
+            import functools
+
+            class Foo:
+                @functools.cached_property
+                def foo(self):
+                    '''
+                    >>> assert False, "Tacos!"
+                    '''
+                    ...
+        """
+        )
+        result = pytester.runpytest(p, "--doctest-modules")
+        result.assert_outcomes(failed=1)
+        assert "Tacos!" in result.stdout.str()
+
     def test_doctestmodule_external_and_issue116(self, pytester: Pytester):
         p = pytester.mkpydir("hello")
         p.joinpath("__init__.py").write_text(
@@ -466,7 +512,8 @@ class TestDoctests:
                         2
                     '''
                 """
-            )
+            ),
+            encoding="utf-8",
         )
         result = pytester.runpytest(p, "--doctest-modules")
         result.stdout.fnmatch_lines(
@@ -1210,7 +1257,6 @@ class TestDoctestSkips:
 
 
 class TestDoctestAutoUseFixtures:
-
     SCOPES = ["module", "session", "class", "function"]
 
     def test_doctest_module_session_fixture(self, pytester: Pytester):
@@ -1353,7 +1399,6 @@ class TestDoctestAutoUseFixtures:
 
 
 class TestDoctestNamespaceFixture:
-
     SCOPES = ["module", "session", "class", "function"]
 
     @pytest.mark.parametrize("scope", SCOPES)
@@ -1542,7 +1587,9 @@ def test_warning_on_unwrap_of_broken_object(
 
 def test_is_setup_py_not_named_setup_py(tmp_path: Path) -> None:
     not_setup_py = tmp_path.joinpath("not_setup.py")
-    not_setup_py.write_text('from setuptools import setup; setup(name="foo")')
+    not_setup_py.write_text(
+        'from setuptools import setup; setup(name="foo")', encoding="utf-8"
+    )
     assert not _is_setup_py(not_setup_py)
 
 

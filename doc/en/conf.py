@@ -15,12 +15,10 @@
 #
 # The full version, including alpha/beta/rc tags.
 # The short X.Y version.
-import ast
 import os
 import shutil
 import sys
 from textwrap import dedent
-from typing import List
 from typing import TYPE_CHECKING
 
 from _pytest import __version__ as version
@@ -38,6 +36,7 @@ release = ".".join(version.split(".")[:2])
 
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
+autodoc_typehints_description_target = "documented"
 todo_include_todos = 1
 
 latex_engine = "lualatex"
@@ -162,12 +161,55 @@ linkcheck_workers = 5
 
 _repo = "https://github.com/pytest-dev/pytest"
 extlinks = {
-    "bpo": ("https://bugs.python.org/issue%s", "bpo-"),
-    "pypi": ("https://pypi.org/project/%s/", ""),
-    "issue": (f"{_repo}/issues/%s", "issue #"),
-    "pull": (f"{_repo}/pull/%s", "pull request #"),
-    "user": ("https://github.com/%s", "@"),
+    "bpo": ("https://bugs.python.org/issue%s", "bpo-%s"),
+    "pypi": ("https://pypi.org/project/%s/", "%s"),
+    "issue": (f"{_repo}/issues/%s", "issue #%s"),
+    "pull": (f"{_repo}/pull/%s", "pull request #%s"),
+    "user": ("https://github.com/%s", "@%s"),
 }
+
+
+nitpicky = True
+nitpick_ignore = [
+    # TODO (fix in pluggy?)
+    ("py:class", "HookCaller"),
+    ("py:class", "HookspecMarker"),
+    ("py:exc", "PluginValidationError"),
+    # Might want to expose/TODO (https://github.com/pytest-dev/pytest/issues/7469)
+    ("py:class", "ExceptionRepr"),
+    ("py:class", "Exit"),
+    ("py:class", "SubRequest"),
+    ("py:class", "SubRequest"),
+    ("py:class", "TerminalReporter"),
+    ("py:class", "_pytest._code.code.TerminalRepr"),
+    ("py:class", "_pytest.fixtures.FixtureFunctionMarker"),
+    ("py:class", "_pytest.logging.LogCaptureHandler"),
+    ("py:class", "_pytest.mark.structures.ParameterSet"),
+    # Intentionally undocumented/private
+    ("py:class", "_pytest._code.code.Traceback"),
+    ("py:class", "_pytest._py.path.LocalPath"),
+    ("py:class", "_pytest.capture.CaptureResult"),
+    ("py:class", "_pytest.compat.NotSetType"),
+    ("py:class", "_pytest.python.PyCollector"),
+    ("py:class", "_pytest.python.PyobjMixin"),
+    ("py:class", "_pytest.python_api.RaisesContext"),
+    ("py:class", "_pytest.recwarn.WarningsChecker"),
+    ("py:class", "_pytest.reports.BaseReport"),
+    # Undocumented third parties
+    ("py:class", "_tracing.TagTracerSub"),
+    ("py:class", "warnings.WarningMessage"),
+    # Undocumented type aliases
+    ("py:class", "_PluggyPlugin"),
+    # TypeVars
+    ("py:class", "_pytest._code.code.E"),
+    ("py:class", "_pytest.fixtures.FixtureFunction"),
+    ("py:class", "_pytest.nodes._NodeType"),
+    ("py:class", "_pytest.python_api.E"),
+    ("py:class", "_pytest.recwarn.T"),
+    ("py:class", "_pytest.runner.TResult"),
+    ("py:obj", "_pytest.fixtures.FixtureValue"),
+    ("py:obj", "_pytest.stash.T"),
+]
 
 
 # -- Options for HTML output ---------------------------------------------------
@@ -247,7 +289,7 @@ html_sidebars = {
 html_domain_indices = True
 
 # If false, no index is generated.
-html_use_index = True
+html_use_index = False
 
 # If true, the index is split into individual pages for each letter.
 # html_split_index = False
@@ -320,7 +362,9 @@ latex_domain_indices = False
 
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
-man_pages = [("usage", "pytest", "pytest usage", ["holger krekel at merlinux eu"], 1)]
+man_pages = [
+    ("how-to/usage", "pytest", "pytest usage", ["holger krekel at merlinux eu"], 1)
+]
 
 
 # -- Options for Epub output ---------------------------------------------------
@@ -338,7 +382,7 @@ epub_copyright = "2013, holger krekel et alii"
 # The scheme of the identifier. Typical schemes are ISBN or URL.
 # epub_scheme = ''
 
-# The unique identifier of the text. This can be a ISBN number
+# The unique identifier of the text. This can be an ISBN number
 # or the project homepage.
 # epub_identifier = ''
 
@@ -390,6 +434,7 @@ intersphinx_mapping = {
     "tox": ("https://tox.wiki/en/stable", None),
     "virtualenv": ("https://virtualenv.pypa.io/en/stable", None),
     "setuptools": ("https://setuptools.pypa.io/en/stable", None),
+    "packaging": ("https://packaging.python.org/en/latest", None),
 }
 
 
@@ -417,8 +462,6 @@ def configure_logging(app: "sphinx.application.Sphinx") -> None:
 
 
 def setup(app: "sphinx.application.Sphinx") -> None:
-    # from sphinx.ext.autodoc import cut_lines
-    # app.connect('autodoc-process-docstring', cut_lines(4, what=['module']))
     app.add_crossref_type(
         "fixture",
         "fixture",
@@ -448,25 +491,6 @@ def setup(app: "sphinx.application.Sphinx") -> None:
     )
 
     configure_logging(app)
-
-    # Make Sphinx mark classes with "final" when decorated with @final.
-    # We need this because we import final from pytest._compat, not from
-    # typing (for Python < 3.8 compat), so Sphinx doesn't detect it.
-    # To keep things simple we accept any `@final` decorator.
-    # Ref: https://github.com/pytest-dev/pytest/pull/7780
-    import sphinx.pycode.ast
-    import sphinx.pycode.parser
-
-    original_is_final = sphinx.pycode.parser.VariableCommentPicker.is_final
-
-    def patched_is_final(self, decorators: List[ast.expr]) -> bool:
-        if original_is_final(self, decorators):
-            return True
-        return any(
-            sphinx.pycode.ast.unparse(decorator) == "final" for decorator in decorators
-        )
-
-    sphinx.pycode.parser.VariableCommentPicker.is_final = patched_is_final
 
     # legacypath.py monkey-patches pytest.Testdir in. Import the file so
     # that autodoc can discover references to it.

@@ -806,12 +806,12 @@ class TestKeywordSelection:
         pytester.makepyfile(
             conftest="""
             import pytest
-            @pytest.hookimpl(hookwrapper=True)
+            @pytest.hookimpl(wrapper=True)
             def pytest_pycollect_makeitem(name):
-                outcome = yield
+                item = yield
                 if name == "TestClass":
-                    item = outcome.get_result()
                     item.extra_keyword_matches.add("xxx")
+                return item
         """
         )
         reprec = pytester.inline_run(p.parent, "-s", "-k", keyword)
@@ -871,17 +871,30 @@ class TestKeywordSelection:
         deselected_tests = dlist[0].items
         assert len(deselected_tests) == 1
 
-    def test_no_match_directories_outside_the_suite(self, pytester: Pytester) -> None:
+    def test_no_match_directories_outside_the_suite(
+        self,
+        pytester: Pytester,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """`-k` should not match against directories containing the test suite (#7040)."""
-        test_contents = """
-            def test_aaa(): pass
-            def test_ddd(): pass
-        """
-        pytester.makepyfile(
-            **{"ddd/tests/__init__.py": "", "ddd/tests/test_foo.py": test_contents}
+        pytester.makefile(
+            **{
+                "suite/pytest": """[pytest]""",
+            },
+            ext=".ini",
         )
+        pytester.makepyfile(
+            **{
+                "suite/ddd/tests/__init__.py": "",
+                "suite/ddd/tests/test_foo.py": """
+                def test_aaa(): pass
+                def test_ddd(): pass
+            """,
+            }
+        )
+        monkeypatch.chdir(pytester.path / "suite")
 
-        def get_collected_names(*args):
+        def get_collected_names(*args: str) -> List[str]:
             _, rec = pytester.inline_genitems(*args)
             calls = rec.getcalls("pytest_collection_finish")
             assert len(calls) == 1
@@ -892,12 +905,6 @@ class TestKeywordSelection:
 
         # do not collect anything based on names outside the collection tree
         assert get_collected_names("-k", pytester._name) == []
-
-        # "-k ddd" should only collect "test_ddd", but not
-        # 'test_aaa' just because one of its parent directories is named "ddd";
-        # this was matched previously because Package.name would contain the full path
-        # to the package
-        assert get_collected_names("-k", "ddd") == ["test_ddd"]
 
 
 class TestMarkDecorator:
@@ -1109,3 +1116,62 @@ def test_marker_expr_eval_failure_handling(pytester: Pytester, expr) -> None:
     result = pytester.runpytest(foo, "-m", expr)
     result.stderr.fnmatch_lines([expected])
     assert result.ret == ExitCode.USAGE_ERROR
+
+
+def test_mark_mro() -> None:
+    xfail = pytest.mark.xfail
+
+    @xfail("a")
+    class A:
+        pass
+
+    @xfail("b")
+    class B:
+        pass
+
+    @xfail("c")
+    class C(A, B):
+        pass
+
+    from _pytest.mark.structures import get_unpacked_marks
+
+    all_marks = get_unpacked_marks(C)
+
+    assert all_marks == [xfail("b").mark, xfail("a").mark, xfail("c").mark]
+
+    assert get_unpacked_marks(C, consider_mro=False) == [xfail("c").mark]
+
+
+# @pytest.mark.issue("https://github.com/pytest-dev/pytest/issues/10447")
+def test_mark_fixture_order_mro(pytester: Pytester):
+    """This ensures we walk marks of the mro starting with the base classes
+    the action at a distance fixtures are taken as minimal example from a real project
+
+    """
+    foo = pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.fixture
+        def add_attr1(request):
+            request.instance.attr1 = object()
+
+
+        @pytest.fixture
+        def add_attr2(request):
+            request.instance.attr2 = request.instance.attr1
+
+
+        @pytest.mark.usefixtures('add_attr1')
+        class Parent:
+            pass
+
+
+        @pytest.mark.usefixtures('add_attr2')
+        class TestThings(Parent):
+            def test_attrs(self):
+                assert self.attr1 == self.attr2
+        """
+    )
+    result = pytester.runpytest(foo)
+    result.assert_outcomes(passed=1)

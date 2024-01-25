@@ -18,24 +18,199 @@ Deprecated Features
 Below is a complete list of all pytest features which are considered deprecated. Using those features will issue
 :class:`~pytest.PytestWarning` or subclasses, which can be filtered using :ref:`standard warning filters <warnings>`.
 
-.. _instance-collector-deprecation:
 
-The ``pytest.Instance`` collector
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. _legacy-path-hooks-deprecated:
 
-.. versionremoved:: 7.0
+Configuring hook specs/impls using markers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``pytest.Instance`` collector type has been removed.
+Before pluggy, pytest's plugin library, was its own package and had a clear API,
+pytest just used ``pytest.mark`` to configure hooks.
 
-Previously, Python test methods were collected as :class:`~pytest.Class` -> ``Instance`` -> :class:`~pytest.Function`.
-Now :class:`~pytest.Class` collects the test methods directly.
+The :py:func:`pytest.hookimpl` and :py:func:`pytest.hookspec` decorators
+have been available since years and should be used instead.
 
-Most plugins which reference ``Instance`` do so in order to ignore or skip it,
-using a check such as ``if isinstance(node, Instance): return``.
-Such plugins should simply remove consideration of ``Instance`` on pytest>=7.
-However, to keep such uses working, a dummy type has been instanted in ``pytest.Instance`` and ``_pytest.python.Instance``,
-and importing it emits a deprecation warning. This will be removed in pytest 8.
+.. code-block:: python
 
+    @pytest.mark.tryfirst
+    def pytest_runtest_call():
+        ...
+
+
+    # or
+    def pytest_runtest_call():
+        ...
+
+
+    pytest_runtest_call.tryfirst = True
+
+should be changed to:
+
+.. code-block:: python
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_call():
+        ...
+
+Changed ``hookimpl`` attributes:
+
+* ``tryfirst``
+* ``trylast``
+* ``optionalhook``
+* ``hookwrapper``
+
+Changed ``hookwrapper`` attributes:
+
+* ``firstresult``
+* ``historic``
+
+
+Directly constructing internal classes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 7.0
+
+Directly constructing the following classes is now deprecated:
+
+- ``_pytest.mark.structures.Mark``
+- ``_pytest.mark.structures.MarkDecorator``
+- ``_pytest.mark.structures.MarkGenerator``
+- ``_pytest.python.Metafunc``
+- ``_pytest.runner.CallInfo``
+- ``_pytest._code.ExceptionInfo``
+- ``_pytest.config.argparsing.Parser``
+- ``_pytest.config.argparsing.OptionGroup``
+- ``_pytest.pytester.HookRecorder``
+
+These constructors have always been considered private, but now issue a deprecation warning, which may become a hard error in pytest 8.
+
+.. _diamond-inheritance-deprecated:
+
+Diamond inheritance between :class:`pytest.Collector` and :class:`pytest.Item`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 7.0
+
+Defining a custom pytest node type which is both an :class:`~pytest.Item` and a :class:`~pytest.Collector` (e.g. :class:`~pytest.File`) now issues a warning.
+It was never sanely supported and triggers hard to debug errors.
+
+Some plugins providing linting/code analysis have been using this as a hack.
+Instead, a separate collector node should be used, which collects the item. See
+:ref:`non-python tests` for an example, as well as an `example pr fixing inheritance`_.
+
+.. _example pr fixing inheritance: https://github.com/asmeurer/pytest-flakes/pull/40/files
+
+
+.. _uncooperative-constructors-deprecated:
+
+Constructors of custom :class:`~_pytest.nodes.Node` subclasses should take ``**kwargs``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 7.0
+
+If custom subclasses of nodes like :class:`pytest.Item` override the
+``__init__`` method, they should take ``**kwargs``. Thus,
+
+.. code-block:: python
+
+    class CustomItem(pytest.Item):
+        def __init__(self, name, parent, additional_arg):
+            super().__init__(name, parent)
+            self.additional_arg = additional_arg
+
+should be turned into:
+
+.. code-block:: python
+
+    class CustomItem(pytest.Item):
+        def __init__(self, *, additional_arg, **kwargs):
+            super().__init__(**kwargs)
+            self.additional_arg = additional_arg
+
+to avoid hard-coding the arguments pytest can pass to the superclass.
+See :ref:`non-python tests` for a full example.
+
+For cases without conflicts, no deprecation warning is emitted. For cases with
+conflicts (such as :class:`pytest.File` now taking ``path`` instead of
+``fspath``, as :ref:`outlined above <node-ctor-fspath-deprecation>`), a
+deprecation warning is now raised.
+
+Applying a mark to a fixture function
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 7.4
+
+Applying a mark to a fixture function never had any effect, but it is a common user error.
+
+.. code-block:: python
+
+    @pytest.mark.usefixtures("clean_database")
+    @pytest.fixture
+    def user() -> User:
+        ...
+
+Users expected in this case that the ``usefixtures`` mark would have its intended effect of using the ``clean_database`` fixture when ``user`` was invoked, when in fact it has no effect at all.
+
+Now pytest will issue a warning when it encounters this problem, and will raise an error in the future versions.
+
+
+Returning non-None value in test functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 7.2
+
+A :class:`pytest.PytestReturnNotNoneWarning` is now emitted if a test function returns something other than `None`.
+
+This prevents a common mistake among beginners that expect that returning a `bool` would cause a test to pass or fail, for example:
+
+.. code-block:: python
+
+    @pytest.mark.parametrize(
+        ["a", "b", "result"],
+        [
+            [1, 2, 5],
+            [2, 3, 8],
+            [5, 3, 18],
+        ],
+    )
+    def test_foo(a, b, result):
+        return foo(a, b) == result
+
+Given that pytest ignores the return value, this might be surprising that it will never fail.
+
+The proper fix is to change the `return` to an `assert`:
+
+.. code-block:: python
+
+    @pytest.mark.parametrize(
+        ["a", "b", "result"],
+        [
+            [1, 2, 5],
+            [2, 3, 8],
+            [5, 3, 18],
+        ],
+    )
+    def test_foo(a, b, result):
+        assert foo(a, b) == result
+
+
+The ``yield_fixture`` function/decorator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 6.2
+
+``pytest.yield_fixture`` is a deprecated alias for :func:`pytest.fixture`.
+
+It has been so for a very long time, so can be search/replaced safely.
+
+
+Removed Features and Breaking Changes
+-------------------------------------
+
+As stated in our :ref:`backwards-compatibility` policy, deprecated features are removed only in major releases after
+an appropriate period of deprecation has passed.
+
+Some breaking changes which could not be deprecated are also listed.
 
 .. _node-ctor-fspath-deprecation:
 
@@ -70,18 +245,18 @@ arguments they only pass on to the superclass.
     resolved in future versions as we slowly get rid of the :pypi:`py`
     dependency (see :issue:`9283` for a longer discussion).
 
-Due to the ongoing migration of methods like :meth:`~_pytest.Item.reportinfo`
+Due to the ongoing migration of methods like :meth:`~pytest.Item.reportinfo`
 which still is expected to return a ``py.path.local`` object, nodes still have
 both ``fspath`` (``py.path.local``) and ``path`` (``pathlib.Path``) attributes,
 no matter what argument was used in the constructor. We expect to deprecate the
 ``fspath`` attribute in a future release.
 
-.. _legacy-path-hooks-deprecated:
 
 ``py.path.local`` arguments for hooks replaced with ``pathlib.Path``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. deprecated:: 7.0
+.. versionremoved:: 8.0
 
 In order to support the transition from ``py.path.local`` to :mod:`pathlib`, the following hooks now receive additional arguments:
 
@@ -103,31 +278,128 @@ The accompanying ``py.path.local`` based paths have been deprecated: plugins whi
     resolved in future versions as we slowly get rid of the :pypi:`py`
     dependency (see :issue:`9283` for a longer discussion).
 
-Directly constructing internal classes
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. deprecated:: 7.0
+.. _nose-deprecation:
 
-Directly constructing the following classes is now deprecated:
+Support for tests written for nose
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``_pytest.mark.structures.Mark``
-- ``_pytest.mark.structures.MarkDecorator``
-- ``_pytest.mark.structures.MarkGenerator``
-- ``_pytest.python.Metafunc``
-- ``_pytest.runner.CallInfo``
-- ``_pytest._code.ExceptionInfo``
-- ``_pytest.config.argparsing.Parser``
-- ``_pytest.config.argparsing.OptionGroup``
-- ``_pytest.pytester.HookRecorder``
+.. deprecated:: 7.2
+.. versionremoved:: 8.0
 
-These constructors have always been considered private, but now issue a deprecation warning, which may become a hard error in pytest 8.
+Support for running tests written for `nose <https://nose.readthedocs.io/en/latest/>`__ is now deprecated.
 
-.. _cmdline-preparse-deprecated:
+``nose`` has been in maintenance mode-only for years, and maintaining the plugin is not trivial as it spills
+over the code base (see :issue:`9886` for more details).
+
+setup/teardown
+^^^^^^^^^^^^^^
+
+One thing that might catch users by surprise is that plain ``setup`` and ``teardown`` methods are not pytest native,
+they are in fact part of the ``nose`` support.
+
+
+.. code-block:: python
+
+    class Test:
+        def setup(self):
+            self.resource = make_resource()
+
+        def teardown(self):
+            self.resource.close()
+
+        def test_foo(self):
+            ...
+
+        def test_bar(self):
+            ...
+
+
+
+Native pytest support uses ``setup_method`` and ``teardown_method`` (see :ref:`xunit-method-setup`), so the above should be changed to:
+
+.. code-block:: python
+
+    class Test:
+        def setup_method(self):
+            self.resource = make_resource()
+
+        def teardown_method(self):
+            self.resource.close()
+
+        def test_foo(self):
+            ...
+
+        def test_bar(self):
+            ...
+
+
+This is easy to do in an entire code base by doing a simple find/replace.
+
+@with_setup
+^^^^^^^^^^^
+
+Code using `@with_setup <with-setup-nose>`_ such as this:
+
+.. code-block:: python
+
+    from nose.tools import with_setup
+
+
+    def setup_some_resource():
+        ...
+
+
+    def teardown_some_resource():
+        ...
+
+
+    @with_setup(setup_some_resource, teardown_some_resource)
+    def test_foo():
+        ...
+
+Will also need to be ported to a supported pytest style. One way to do it is using a fixture:
+
+.. code-block:: python
+
+    import pytest
+
+
+    def setup_some_resource():
+        ...
+
+
+    def teardown_some_resource():
+        ...
+
+
+    @pytest.fixture
+    def some_resource():
+        setup_some_resource()
+        yield
+        teardown_some_resource()
+
+
+    def test_foo(some_resource):
+        ...
+
+
+.. _`with-setup-nose`: https://nose.readthedocs.io/en/latest/testing_tools.html?highlight=with_setup#nose.tools.with_setup
+
+
+The ``compat_co_firstlineno`` attribute
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Nose inspects this attribute on function objects to allow overriding the function's inferred line number.
+Pytest no longer respects this attribute.
+
+
 
 Passing ``msg=`` to ``pytest.skip``, ``pytest.fail`` or ``pytest.exit``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. deprecated:: 7.0
+.. versionremoved:: 8.0
 
 Passing the keyword argument ``msg`` to :func:`pytest.skip`, :func:`pytest.fail` or :func:`pytest.exit`
 is now deprecated and ``reason`` should be used instead.  This change is to bring consistency between these
@@ -156,12 +428,74 @@ functions and the ``@pytest.mark.skip`` and ``@pytest.mark.xfail`` markers which
         pytest.exit(reason="bar")
 
 
+.. _instance-collector-deprecation:
+
+The ``pytest.Instance`` collector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionremoved:: 7.0
+
+The ``pytest.Instance`` collector type has been removed.
+
+Previously, Python test methods were collected as :class:`~pytest.Class` -> ``Instance`` -> :class:`~pytest.Function`.
+Now :class:`~pytest.Class` collects the test methods directly.
+
+Most plugins which reference ``Instance`` do so in order to ignore or skip it,
+using a check such as ``if isinstance(node, Instance): return``.
+Such plugins should simply remove consideration of ``Instance`` on pytest>=7.
+However, to keep such uses working, a dummy type has been instanted in ``pytest.Instance`` and ``_pytest.python.Instance``,
+and importing it emits a deprecation warning. This was removed in pytest 8.
+
+
+Using ``pytest.warns(None)``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 7.0
+.. versionremoved:: 8.0
+
+:func:`pytest.warns(None) <pytest.warns>` is now deprecated because it was frequently misused.
+Its correct usage was checking that the code emits at least one warning of any type - like ``pytest.warns()``
+or ``pytest.warns(Warning)``.
+
+See :ref:`warns use cases` for examples.
+
+
+Backward compatibilities in ``Parser.addoption``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 2.4
+.. versionremoved:: 8.0
+
+Several behaviors of :meth:`Parser.addoption <pytest.Parser.addoption>` are now
+removed in pytest 8 (deprecated since pytest 2.4.0):
+
+- ``parser.addoption(..., help=".. %default ..")`` - use ``%(default)s`` instead.
+- ``parser.addoption(..., type="int/string/float/complex")`` - use ``type=int`` etc. instead.
+
+
+The ``--strict`` command-line option
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. deprecated:: 6.2
+.. versionremoved:: 8.0
+
+The ``--strict`` command-line option has been deprecated in favor of ``--strict-markers``, which
+better conveys what the option does.
+
+We have plans to maybe in the future to reintroduce ``--strict`` and make it an encompassing
+flag for all strictness related options (``--strict-markers`` and ``--strict-config``
+at the moment, more might be introduced in the future).
+
+
+.. _cmdline-preparse-deprecated:
+
 Implementing the ``pytest_cmdline_preparse`` hook
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. deprecated:: 7.0
+.. versionremoved:: 8.0
 
-Implementing the :hook:`pytest_cmdline_preparse` hook has been officially deprecated.
+Implementing the ``pytest_cmdline_preparse`` hook has been officially deprecated.
 Implement the :hook:`pytest_load_initial_conftests` hook instead.
 
 .. code-block:: python
@@ -178,108 +512,118 @@ Implement the :hook:`pytest_load_initial_conftests` hook instead.
     ) -> None:
         ...
 
-.. _diamond-inheritance-deprecated:
 
-Diamond inheritance between :class:`pytest.Collector` and :class:`pytest.Item`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Collection changes in pytest 8
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. deprecated:: 7.0
+Added a new :class:`pytest.Directory` base collection node, which all collector nodes for filesystem directories are expected to subclass.
+This is analogous to the existing :class:`pytest.File` for file nodes.
 
-Defining a custom pytest node type which is both an :class:`pytest.Item <Item>` and a :class:`pytest.Collector <Collector>` (e.g. :class:`pytest.File <File>`) now issues a warning.
-It was never sanely supported and triggers hard to debug errors.
+Changed :class:`pytest.Package` to be a subclass of :class:`pytest.Directory`.
+A ``Package`` represents a filesystem directory which is a Python package,
+i.e. contains an ``__init__.py`` file.
 
-Some plugins providing linting/code analysis have been using this as a hack.
-Instead, a separate collector node should be used, which collects the item. See
-:ref:`non-python tests` for an example, as well as an `example pr fixing inheritance`_.
+:class:`pytest.Package` now only collects files in its own directory; previously it collected recursively.
+Sub-directories are collected as sub-collector nodes, thus creating a collection tree which mirrors the filesystem hierarchy.
 
-.. _example pr fixing inheritance: https://github.com/asmeurer/pytest-flakes/pull/40/files
+:attr:`session.name <pytest.Session.name>` is now ``""``; previously it was the rootdir directory name.
+This matches :attr:`session.nodeid <_pytest.nodes.Node.nodeid>` which has always been `""`.
 
+Added a new :class:`pytest.Dir` concrete collection node, a subclass of :class:`pytest.Directory`.
+This node represents a filesystem directory, which is not a :class:`pytest.Package`,
+i.e. does not contain an ``__init__.py`` file.
+Similarly to ``Package``, it only collects the files in its own directory,
+while collecting sub-directories as sub-collector nodes.
 
-.. _uncooperative-constructors-deprecated:
+Files and directories are now collected in alphabetical order jointly, unless changed by a plugin.
+Previously, files were collected before directories.
 
-Constructors of custom :class:`pytest.Node` subclasses should take ``**kwargs``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The collection tree now contains directories/packages up to the :ref:`rootdir <rootdir>`,
+for initial arguments that are found within the rootdir.
+For files outside the rootdir, only the immediate directory/package is collected --
+note however that collecting from outside the rootdir is discouraged.
 
-.. deprecated:: 7.0
+As an example, given the following filesystem tree::
 
-If custom subclasses of nodes like :class:`pytest.Item` override the
-``__init__`` method, they should take ``**kwargs``. Thus,
+    myroot/
+        pytest.ini
+        top/
+        ├── aaa
+        │   └── test_aaa.py
+        ├── test_a.py
+        ├── test_b
+        │   ├── __init__.py
+        │   └── test_b.py
+        ├── test_c.py
+        └── zzz
+            ├── __init__.py
+            └── test_zzz.py
 
-.. code-block:: python
+the collection tree, as shown by `pytest --collect-only top/` but with the otherwise-hidden :class:`~pytest.Session` node added for clarity,
+is now the following::
 
-    class CustomItem(pytest.Item):
-        def __init__(self, name, parent, additional_arg):
-            super().__init__(name, parent)
-            self.additional_arg = additional_arg
+    <Session>
+      <Dir myroot>
+        <Dir top>
+          <Dir aaa>
+            <Module test_aaa.py>
+              <Function test_it>
+          <Module test_a.py>
+            <Function test_it>
+          <Package test_b>
+            <Module test_b.py>
+              <Function test_it>
+          <Module test_c.py>
+            <Function test_it>
+          <Package zzz>
+            <Module test_zzz.py>
+              <Function test_it>
 
-should be turned into:
+Previously, it was::
 
-.. code-block:: python
+    <Session>
+      <Module top/test_a.py>
+        <Function test_it>
+      <Module top/test_c.py>
+        <Function test_it>
+      <Module top/aaa/test_aaa.py>
+        <Function test_it>
+      <Package test_b>
+        <Module test_b.py>
+          <Function test_it>
+      <Package zzz>
+        <Module test_zzz.py>
+          <Function test_it>
 
-    class CustomItem(pytest.Item):
-        def __init__(self, *, additional_arg, **kwargs):
-            super().__init__(**kwargs)
-            self.additional_arg = additional_arg
-
-to avoid hard-coding the arguments pytest can pass to the superclass.
-See :ref:`non-python tests` for a full example.
-
-For cases without conflicts, no deprecation warning is emitted. For cases with
-conflicts (such as :class:`pytest.File` now taking ``path`` instead of
-``fspath``, as :ref:`outlined above <node-ctor-fspath-deprecation>`), a
-deprecation warning is now raised.
-
-Backward compatibilities in ``Parser.addoption``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. deprecated:: 2.4
-
-Several behaviors of :meth:`Parser.addoption <pytest.Parser.addoption>` are now
-scheduled for removal in pytest 8 (deprecated since pytest 2.4.0):
-
-- ``parser.addoption(..., help=".. %default ..")`` - use ``%(default)s`` instead.
-- ``parser.addoption(..., type="int/string/float/complex")`` - use ``type=int`` etc. instead.
-
-
-Using ``pytest.warns(None)``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. deprecated:: 7.0
-
-:func:`pytest.warns(None) <pytest.warns>` is now deprecated because it was frequently misused.
-Its correct usage was checking that the code emits at least one warning of any type - like ``pytest.warns()``
-or ``pytest.warns(Warning)``.
-
-See :ref:`warns use cases` for examples.
-
-The ``--strict`` command-line option
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. deprecated:: 6.2
-
-The ``--strict`` command-line option has been deprecated in favor of ``--strict-markers``, which
-better conveys what the option does.
-
-We have plans to maybe in the future to reintroduce ``--strict`` and make it an encompassing
-flag for all strictness related options (``--strict-markers`` and ``--strict-config``
-at the moment, more might be introduced in the future).
-
-
-The ``yield_fixture`` function/decorator
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. deprecated:: 6.2
-
-``pytest.yield_fixture`` is a deprecated alias for :func:`pytest.fixture`.
-
-It has been so for a very long time, so can be search/replaced safely.
+Code/plugins which rely on a specific shape of the collection tree might need to update.
 
 
-Removed Features
-----------------
+:class:`pytest.Package` is no longer a :class:`pytest.Module` or :class:`pytest.File`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-As stated in our :ref:`backwards-compatibility` policy, deprecated features are removed only in major releases after
-an appropriate period of deprecation has passed.
+.. versionchanged:: 8.0
+
+The ``Package`` collector node designates a Python package, that is, a directory with an `__init__.py` file.
+Previously ``Package`` was a subtype of ``pytest.Module`` (which represents a single Python module),
+the module being the `__init__.py` file.
+This has been deemed a design mistake (see :issue:`11137` and :issue:`7777` for details).
+
+The ``path`` property of ``Package`` nodes now points to the package directory instead of the ``__init__.py`` file.
+
+Note that a ``Module`` node for ``__init__.py`` (which is not a ``Package``) may still exist,
+if it is picked up during collection (e.g. if you configured :confval:`python_files` to include ``__init__.py`` files).
+
+
+Collecting ``__init__.py`` files no longer collects package
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionremoved:: 8.0
+
+Running `pytest pkg/__init__.py` now collects the `pkg/__init__.py` file (module) only.
+Previously, it collected the entire `pkg` package, including other test files in the directory, but excluding tests in the `__init__.py` file itself
+(unless :confval:`python_files` was changed to allow `__init__.py` file).
+
+To collect the entire package, specify just the directory: `pytest pkg`.
 
 
 The ``pytest.collect`` module
@@ -301,7 +645,7 @@ The ``pytest_warning_captured`` hook
 
 This hook has an `item` parameter which cannot be serialized by ``pytest-xdist``.
 
-Use the ``pytest_warning_recored`` hook instead, which replaces the ``item`` parameter
+Use the ``pytest_warning_recorded`` hook instead, which replaces the ``item`` parameter
 by a ``nodeid`` parameter.
 
 
@@ -404,7 +748,7 @@ By using ``legacy`` you will keep using the legacy/xunit1 format when upgrading 
 pytest 6.0, where the default format will be ``xunit2``.
 
 In order to let users know about the transition, pytest will issue a warning in case
-the ``--junitxml`` option is given in the command line but ``junit_family`` is not explicitly
+the ``--junit-xml`` option is given in the command line but ``junit_family`` is not explicitly
 configured in ``pytest.ini``.
 
 Services known to support the ``xunit2`` format:
@@ -860,7 +1204,7 @@ that are then turned into proper test methods. Example:
 .. code-block:: python
 
     def check(x, y):
-        assert x ** x == y
+        assert x**x == y
 
 
     def test_squared():
@@ -875,7 +1219,7 @@ This form of test function doesn't support fixtures properly, and users should s
 
     @pytest.mark.parametrize("x, y", [(2, 4), (3, 9)])
     def test_squared(x, y):
-        assert x ** x == y
+        assert x**x == y
 
 .. _internal classes accessed through node deprecated:
 
